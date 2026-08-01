@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import { assertApprovalBinding, ApprovalBindingError } from '../approval/approval-binding.mjs';
+import {
+  gatekeeperApprovalFingerprint,
+  GatekeeperSignatureError
+} from '../approval/gatekeeper-signatures.mjs';
 import { planFingerprint } from '../plan/fingerprint.mjs';
 
 const SUBJECT_FIELDS = Object.freeze([
@@ -25,16 +29,21 @@ export class ClaimLedgerError extends Error {
  * File-backed, single-writer claim ledger.
  *
  * Atomic unit:
- * validate exact approval -> claim idempotency key -> consume approval
- * -> issue exact dispatch permit. BEGIN IMMEDIATE prevents two writers from
- * independently succeeding against the same approval or idempotency key.
+ * verify signed approval -> validate exact subject -> claim idempotency key
+ * -> consume approval -> issue exact dispatch permit.
  */
 export class SqliteClaimLedger {
   #db;
   #idFactory;
   #permitTtlMs;
+  #approvalVerifier;
 
-  constructor(path, { timeoutMs = 5_000, permitTtlMs = 60_000, idFactory = defaultIdFactory } = {}) {
+  constructor(path, {
+    timeoutMs = 5_000,
+    permitTtlMs = 60_000,
+    idFactory = defaultIdFactory,
+    approvalVerifier
+  } = {}) {
     if (typeof path !== 'string' || path.trim() === '') {
       throw new ClaimLedgerError('ledger path is required', 'LEDGER_PATH_INVALID');
     }
@@ -47,9 +56,13 @@ export class SqliteClaimLedger {
     if (typeof idFactory !== 'function') {
       throw new ClaimLedgerError('idFactory must be a function', 'ID_FACTORY_INVALID');
     }
+    if (!approvalVerifier || typeof approvalVerifier.verify !== 'function') {
+      throw new ClaimLedgerError('Gatekeeper approval verifier is required', 'APPROVAL_VERIFIER_REQUIRED');
+    }
 
     this.#idFactory = idFactory;
     this.#permitTtlMs = permitTtlMs;
+    this.#approvalVerifier = approvalVerifier;
     this.#db = new DatabaseSync(path, { timeout: timeoutMs });
     this.#db.exec(`
       PRAGMA foreign_keys = ON;
@@ -76,6 +89,20 @@ export class SqliteClaimLedger {
           OR
           (status <> 'consumed' AND consumed_at IS NULL AND consumed_by_claim_id IS NULL)
         )
+      ) STRICT;
+
+      CREATE TABLE IF NOT EXISTS approval_authenticity (
+        approval_id TEXT PRIMARY KEY,
+        issuer TEXT NOT NULL,
+        key_id TEXT NOT NULL,
+        key_status_at_registration TEXT NOT NULL CHECK (key_status_at_registration IN ('active', 'retired')),
+        key_fingerprint TEXT NOT NULL,
+        signature_fingerprint TEXT NOT NULL,
+        signature_algorithm TEXT NOT NULL,
+        signature_version TEXT NOT NULL,
+        signature TEXT NOT NULL,
+        verified_at TEXT NOT NULL,
+        FOREIGN KEY (approval_id) REFERENCES approvals(approval_id)
       ) STRICT;
 
       CREATE TABLE IF NOT EXISTS idempotency_claims (
@@ -113,30 +140,46 @@ export class SqliteClaimLedger {
   }
 
   registerApproval({ approval, now = new Date() }) {
+    const authenticity = this.#verifyApproval(approval, now);
     const expected = exactSubject(approval);
     assertApprovalBinding({ approval, expected, now });
-    const approvalFingerprint = planFingerprint({
-      ...expected,
-      issuedAt: canonicalTimestamp(approval.issuedAt, 'APPROVAL_ISSUED_AT_INVALID'),
-      expiresAt: canonicalTimestamp(approval.expiresAt, 'APPROVAL_EXPIRY_INVALID'),
-      status: approval.status
-    });
+    const approvalFingerprint = gatekeeperApprovalFingerprint(approval);
+    const verifiedAt = canonicalDate(now, 'APPROVAL_VERIFICATION_TIME_INVALID');
 
     return this.#transaction(() => {
       const existing = this.#db.prepare(`
-        SELECT approval_fingerprint AS approvalFingerprint
-        FROM approvals
-        WHERE approval_id = ?
+        SELECT
+          a.approval_fingerprint AS approvalFingerprint,
+          auth.key_fingerprint AS keyFingerprint,
+          auth.signature_fingerprint AS signatureFingerprint
+        FROM approvals a
+        LEFT JOIN approval_authenticity auth ON auth.approval_id = a.approval_id
+        WHERE a.approval_id = ?
       `).get(approval.approvalId);
 
       if (existing) {
-        if (existing.approvalFingerprint !== approvalFingerprint) {
+        if (!existing.keyFingerprint || !existing.signatureFingerprint) {
           throw new ClaimLedgerError(
-            'approval id was reused with different content',
+            'existing approval has no verified Gatekeeper authenticity record',
+            'APPROVAL_AUTHENTICITY_MISSING'
+          );
+        }
+        if (
+          existing.approvalFingerprint !== approvalFingerprint ||
+          existing.keyFingerprint !== authenticity.keyFingerprint ||
+          existing.signatureFingerprint !== authenticity.signatureFingerprint
+        ) {
+          throw new ClaimLedgerError(
+            'approval id was reused with different signed content',
             'APPROVAL_ID_REUSE_MISMATCH'
           );
         }
-        return Object.freeze({ approvalId: approval.approvalId, recorded: false });
+        return Object.freeze({
+          approvalId: approval.approvalId,
+          issuer: authenticity.issuer,
+          keyId: authenticity.keyId,
+          recorded: false
+        });
       }
 
       this.#db.prepare(`
@@ -158,7 +201,31 @@ export class SqliteClaimLedger {
         approvalFingerprint
       );
 
-      return Object.freeze({ approvalId: approval.approvalId, recorded: true });
+      this.#db.prepare(`
+        INSERT INTO approval_authenticity (
+          approval_id, issuer, key_id, key_status_at_registration,
+          key_fingerprint, signature_fingerprint, signature_algorithm,
+          signature_version, signature, verified_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        approval.approvalId,
+        authenticity.issuer,
+        authenticity.keyId,
+        authenticity.keyStatus,
+        authenticity.keyFingerprint,
+        authenticity.signatureFingerprint,
+        approval.signatureAlgorithm,
+        approval.signatureVersion,
+        approval.signature,
+        verifiedAt
+      );
+
+      return Object.freeze({
+        approvalId: approval.approvalId,
+        issuer: authenticity.issuer,
+        keyId: authenticity.keyId,
+        recorded: true
+      });
     });
   }
 
@@ -187,27 +254,37 @@ export class SqliteClaimLedger {
 
       const approvalRow = this.#db.prepare(`
         SELECT
-          approval_id AS approvalId,
-          job_id AS jobId,
-          plan_fingerprint AS planFingerprint,
-          component_ref AS componentRef,
-          method,
-          idempotency_key AS idempotencyKey,
-          policy_version AS policyVersion,
-          issued_at AS issuedAt,
-          expires_at AS expiresAt,
-          status
-        FROM approvals
-        WHERE approval_id = ?
+          a.approval_id AS approvalId,
+          a.job_id AS jobId,
+          a.plan_fingerprint AS planFingerprint,
+          a.component_ref AS componentRef,
+          a.method,
+          a.idempotency_key AS idempotencyKey,
+          a.policy_version AS policyVersion,
+          a.issued_at AS issuedAt,
+          a.expires_at AS expiresAt,
+          a.status,
+          auth.issuer,
+          auth.key_id AS keyId,
+          auth.signature_algorithm AS signatureAlgorithm,
+          auth.signature_version AS signatureVersion,
+          auth.signature
+        FROM approvals a
+        LEFT JOIN approval_authenticity auth ON auth.approval_id = a.approval_id
+        WHERE a.approval_id = ?
       `).get(subject.approvalId);
 
       if (!approvalRow) {
         throw new ClaimLedgerError('approval was not recorded', 'AUTHORIZATION_MISSING');
       }
+      if (!approvalRow.issuer || !approvalRow.keyId || !approvalRow.signature) {
+        throw new ClaimLedgerError('approval authenticity is missing', 'APPROVAL_AUTHENTICITY_MISSING');
+      }
       if (approvalRow.status === 'consumed') {
         throw new ClaimLedgerError('approval was already consumed', 'AUTHORIZATION_CONSUMED');
       }
 
+      this.#verifyApproval(approvalRow, now);
       try {
         assertApprovalBinding({ approval: approvalRow, expected: subject, now });
       } catch (error) {
@@ -278,12 +355,17 @@ export class SqliteClaimLedger {
   getApproval(approvalId) {
     const row = this.#db.prepare(`
       SELECT
-        approval_id AS approvalId,
-        status,
-        consumed_at AS consumedAt,
-        consumed_by_claim_id AS consumedByClaimId
-      FROM approvals
-      WHERE approval_id = ?
+        a.approval_id AS approvalId,
+        a.status,
+        a.consumed_at AS consumedAt,
+        a.consumed_by_claim_id AS consumedByClaimId,
+        auth.issuer,
+        auth.key_id AS keyId,
+        auth.key_fingerprint AS keyFingerprint,
+        auth.signature_fingerprint AS signatureFingerprint
+      FROM approvals a
+      LEFT JOIN approval_authenticity auth ON auth.approval_id = a.approval_id
+      WHERE a.approval_id = ?
     `).get(approvalId);
     return row ? Object.freeze({ ...row }) : null;
   }
@@ -295,6 +377,21 @@ export class SqliteClaimLedger {
       WHERE idempotency_key = ?
     `).get(idempotencyKey);
     return row ? freezePermit(this.#permitByClaimId(row.claimId), false) : null;
+  }
+
+  #verifyApproval(approval, now) {
+    try {
+      return this.#approvalVerifier.verify(approval, { now });
+    } catch (error) {
+      if (error instanceof GatekeeperSignatureError) {
+        throw new ClaimLedgerError(error.message, error.code, { cause: error });
+      }
+      throw new ClaimLedgerError(
+        'Gatekeeper approval verification failed',
+        'GATEKEEPER_VERIFICATION_FAILED',
+        { cause: error }
+      );
+    }
   }
 
   #permitByClaimId(claimId) {

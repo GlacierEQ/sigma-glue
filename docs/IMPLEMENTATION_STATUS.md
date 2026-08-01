@@ -10,6 +10,19 @@
 - Reachable `skipped` semantics before dispatch
 - Separation of provider confirmation from reconciliation
 
+## Verified Gatekeeper authenticity
+
+- Ed25519-signed canonical approval envelopes
+- Issuer and key-ID trust-store resolution
+- Active, retired, and revoked key states
+- Key signing-validity and retirement windows
+- Historical verification under retired keys
+- Overlapping old/new key rotation
+- Signed-field substitution rejection
+- Separate key and signature fingerprints
+- Claim-time re-verification so later revocation blocks unconsumed approvals
+- Unsigned legacy approval rows cannot authorize claims
+
 ## Verified durable authority handoff
 
 - File-backed SQLite approval and idempotency ledger
@@ -37,18 +50,21 @@
 ## Verification
 
 ```text
-26 tests passed
+36 tests passed
 0 tests failed
+GitHub merge-commit verification: success
 ```
 
 ## Not yet implemented or verified
 
-- Gatekeeper transport and cryptographic authenticity verification
-- Live Colossus endpoint or production transport
+- Remote Gatekeeper transport and trust-store distribution
+- Private signing-key custody
+- Live Colossus HTTP transport
+- Credential broker integration
 - Distributed or multi-host consensus
 - Provider adapter execution
+- Durable attempt and reconciliation ledger
 - Provider-backed confirmation and reconciliation
-- Credential broker integration
 - Redacted persistent diagnostics
 - Platform capability adapters
 - Offline/resume behavior above the ledger layer
