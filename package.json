@@ -1,0 +1,17 @@
+{
+  "name": "@glaciereq/sigma-glue",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Fail-closed workflow orchestration and exact approval binding for Sigma Federation.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "5.8.3"
+  }
+}
