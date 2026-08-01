@@ -59,7 +59,7 @@ test('rejects unknown and revoked signing keys', () => {
     keys: [{
       issuer: 'gatekeeper.test',
       keyId: 'other-key',
-      publicKey: other.publicKey,
+      publicKey: other.publicKey.export({ type: 'spki', format: 'pem' }),
       status: 'active',
       notBefore: '2026-01-01T00:00:00.000Z',
       notAfter: '2027-01-01T00:00:00.000Z'
@@ -96,12 +96,14 @@ test('retired keys verify historical approvals but cannot sign after retirement'
 
 test('rotation accepts historical old-key approvals and current new-key approvals', () => {
   const next = generateKeyPairSync('ed25519');
+  const nextPrivateKey = next.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const nextPublicKey = next.publicKey.export({ type: 'spki', format: 'pem' });
   const oldApproval = signTestApproval(approval({ issuedAt: '2026-07-31T23:00:00.000Z' }));
   const newApproval = signGatekeeperApproval({
     approval: approval({ approvalId: 'approval-next', idempotencyKey: 'idem-next' }),
     issuer: TEST_GATEKEEPER.issuer,
     keyId: 'key-next',
-    privateKey: next.privateKey
+    privateKey: nextPrivateKey
   });
   const store = new GatekeeperTrustStore({
     keys: [
@@ -117,7 +119,7 @@ test('rotation accepts historical old-key approvals and current new-key approval
       {
         issuer: TEST_GATEKEEPER.issuer,
         keyId: 'key-next',
-        publicKey: next.publicKey,
+        publicKey: nextPublicKey,
         status: 'active',
         notBefore: '2026-08-01T00:00:00.000Z',
         notAfter: '2027-08-01T00:00:00.000Z'
