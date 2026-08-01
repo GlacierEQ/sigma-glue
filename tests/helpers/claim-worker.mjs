@@ -1,7 +1,11 @@
 import { SqliteClaimLedger } from '../../src/ledger/sqlite-claim-ledger.mjs';
+import { createTestTrustStore } from './gatekeeper-fixture.mjs';
 
 const [dbPath, expectedJson, nowIso] = process.argv.slice(2);
-const ledger = new SqliteClaimLedger(dbPath, { timeoutMs: 10_000 });
+const ledger = new SqliteClaimLedger(dbPath, {
+  timeoutMs: 10_000,
+  approvalVerifier: createTestTrustStore()
+});
 try {
   const permit = ledger.claimDispatchPermit({
     expected: JSON.parse(expectedJson),
