@@ -1,7 +1,10 @@
 import { SqliteExecutionLedger } from '../../src/ledger/sqlite-execution-ledger.mjs';
+import { VerifiedExecutionLedger } from '../../src/execution/verified-execution-ledger.mjs';
 
 const [dbPath, operationId, transitionKey, envelopeFingerprint, nowIso] = process.argv.slice(2);
-const ledger = new SqliteExecutionLedger(dbPath, { timeoutMs: 10_000 });
+const ledger = new VerifiedExecutionLedger({
+  ledger: new SqliteExecutionLedger(dbPath, { timeoutMs: 10_000 })
+});
 try {
   const operation = ledger.recordAttempt({
     operationId,
