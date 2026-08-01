@@ -1,16 +1,21 @@
-import { generateKeyPairSync } from 'node:crypto';
 import {
   GatekeeperTrustStore,
   signGatekeeperApproval
 } from '../../src/approval/gatekeeper-signatures.mjs';
 
-const primary = generateKeyPairSync('ed25519');
+const PRIVATE_KEY = `-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIKerljb0LRxhPIFU+KBdXeL+eSSHRnPxdvzpFZ9l5eK0
+-----END PRIVATE KEY-----`;
+
+const PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEANjw4SE5jM8pYb1c6MG93NWl2hNcL+E2gotSRV7S7Gwg=
+-----END PUBLIC KEY-----`;
 
 export const TEST_GATEKEEPER = Object.freeze({
   issuer: 'gatekeeper.test',
   keyId: 'key-primary',
-  privateKey: primary.privateKey,
-  publicKey: primary.publicKey,
+  privateKey: PRIVATE_KEY,
+  publicKey: PUBLIC_KEY,
   notBefore: '2026-01-01T00:00:00.000Z',
   notAfter: '2027-01-01T00:00:00.000Z'
 });
