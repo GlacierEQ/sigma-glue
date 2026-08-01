@@ -47,20 +47,31 @@
 - The transport is abort-aware and receives exactly one call with no hidden retry
 - Dispatch receipts are exact-bound and cannot claim provider confirmation or reconciliation
 
+## Verified concrete transport contract
+
+- HTTPS-only Colossus endpoint policy
+- Endpoint userinfo, query, fragment, and cross-origin redirect rejection
+- Opaque `credh_` broker handles passed separately from HTTP requests
+- No authorization or cookie value exposed to Sigma Glue request construction
+- Broker-owned authenticated fetch interface
+- Canonical POST body and fixed non-secret headers
+- Abort propagation and one-attempt behavior
+- HTTP status, JSON content type, response shape, and response-size enforcement
+- Error-body suppression and broker-error redaction
+
 ## Verification
 
 ```text
-36 tests passed
-0 tests failed
-GitHub merge-commit verification: success
+46 tests expected in this tranche
+GitHub merge-commit verification required before merge
 ```
 
 ## Not yet implemented or verified
 
 - Remote Gatekeeper transport and trust-store distribution
 - Private signing-key custody
-- Live Colossus HTTP transport
-- Credential broker integration
+- Live Colossus deployment connectivity
+- Production credential-broker implementation and token custody
 - Distributed or multi-host consensus
 - Provider adapter execution
 - Durable attempt and reconciliation ledger
@@ -69,4 +80,4 @@ GitHub merge-commit verification: success
 - Platform capability adapters
 - Offline/resume behavior above the ledger layer
 
-The adapter verifies and routes a durable permit through an injected Colossus transport. A `dispatched` receipt means routing acceptance only; it is not provider confirmation or reconciliation.
+The adapter and concrete transport can construct and route a durable permit through an opaque credential-broker interface. A `dispatched` receipt means routing acceptance only; it is not provider confirmation or reconciliation.
