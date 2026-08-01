@@ -59,10 +59,25 @@
 - HTTP status, JSON content type, response shape, and response-size enforcement
 - Error-body suppression and broker-error redaction
 
+## Verified durable execution and reconciliation
+
+- Separate durable states for `dispatched`, `attempted`, `provider_confirmed`, `reconciling`, and `reconciled`
+- Reconciliation mismatch terminates as `recovery_required`
+- Append-only hash-chained execution evidence
+- Exact transition-key idempotency and changed-evidence rejection
+- Durable provider-confirmation and reconciliation records
+- Eight-process duplicate-attempt convergence
+- Event-chain verification across close and reopen
+- Verified execution façade binding attempts to the dispatched adapter and envelope
+- Reconciliation expectation bound to the provider-confirmed after-state
+- Reconciliation completion bound to the selected observation method
+- Evidence timestamps bound to prior durable state and observation time
+- Coordinator distinguishes dispatch rejection from post-acceptance persistence failure
+
 ## Verification
 
 ```text
-46 tests passed
+62 tests passed
 0 tests failed
 GitHub merge-commit verification: success
 ```
@@ -75,10 +90,9 @@ GitHub merge-commit verification: success
 - Production credential-broker implementation and token custody
 - Distributed or multi-host consensus
 - Provider adapter execution
-- Durable attempt and reconciliation ledger
-- Provider-backed confirmation and reconciliation
+- Live provider-backed confirmation and reconciliation
 - Redacted persistent diagnostics
 - Platform capability adapters
 - Offline/resume behavior above the ledger layer
 
-The adapter and concrete transport can construct and route a durable permit through an opaque credential-broker interface. A `dispatched` receipt means routing acceptance only; it is not provider confirmation or reconciliation.
+Sigma Glue can now represent the complete evidence-state chain through reconciliation, but it does not manufacture provider evidence. A provider-confirmed or reconciled state requires direct evidence supplied by a future provider adapter.
