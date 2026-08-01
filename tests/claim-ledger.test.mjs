@@ -6,11 +6,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { SqliteClaimLedger, ClaimLedgerError } from '../src/ledger/sqlite-claim-ledger.mjs';
+import {
+  createTestTrustStore,
+  signTestApproval
+} from './helpers/gatekeeper-fixture.mjs';
 
 const execFileAsync = promisify(execFile);
 const NOW = new Date('2026-08-01T22:00:00.000Z');
 
-function approval(overrides = {}) {
+function unsignedApproval(overrides = {}) {
   return {
     approvalId: 'approval-1',
     jobId: 'job-1',
@@ -26,6 +30,10 @@ function approval(overrides = {}) {
   };
 }
 
+function approval(overrides = {}) {
+  return signTestApproval(unsignedApproval(overrides));
+}
+
 function expected(source = approval()) {
   const {
     approvalId, jobId, planFingerprint, componentRef,
@@ -37,14 +45,47 @@ function expected(source = approval()) {
 async function withLedger(run, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'sigma-glue-ledger-'));
   const dbPath = join(dir, 'claims.sqlite');
+  const baseOptions = { approvalVerifier: createTestTrustStore(), ...options };
   try {
-    return await run({ dbPath, open: () => new SqliteClaimLedger(dbPath, options) });
+    return await run({
+      dbPath,
+      open: (overrides = {}) => new SqliteClaimLedger(dbPath, { ...baseOptions, ...overrides })
+    });
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
 }
 
-test('persists approvals and permits across reopen', async () => {
+test('requires a Gatekeeper approval verifier', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'sigma-glue-ledger-verifier-'));
+  try {
+    assert.throws(
+      () => new SqliteClaimLedger(join(dir, 'claims.sqlite')),
+      (error) => error instanceof ClaimLedgerError && error.code === 'APPROVAL_VERIFIER_REQUIRED'
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('rejects unsigned and tampered approvals before persistence', async () => {
+  await withLedger(({ open }) => {
+    const ledger = open();
+    assert.throws(
+      () => ledger.registerApproval({ approval: unsignedApproval(), now: NOW }),
+      (error) => error instanceof ClaimLedgerError && error.code === 'GATEKEEPER_APPROVAL_INVALID'
+    );
+    const signed = approval();
+    assert.throws(
+      () => ledger.registerApproval({ approval: { ...signed, jobId: 'job-tampered' }, now: NOW }),
+      (error) => error instanceof ClaimLedgerError && error.code === 'GATEKEEPER_SIGNATURE_MISMATCH'
+    );
+    assert.equal(ledger.getApproval('approval-1'), null);
+    ledger.close();
+  });
+});
+
+test('persists signed approval authenticity and permits across reopen', async () => {
   await withLedger(({ open }) => {
     const first = open();
     first.registerApproval({ approval: approval(), now: NOW });
@@ -52,7 +93,10 @@ test('persists approvals and permits across reopen', async () => {
     first.close();
 
     const reopened = open();
-    assert.equal(reopened.getApproval('approval-1').status, 'consumed');
+    const stored = reopened.getApproval('approval-1');
+    assert.equal(stored.status, 'consumed');
+    assert.equal(stored.issuer, 'gatekeeper.test');
+    assert.match(stored.keyFingerprint, /^sha256:[0-9a-f]{64}$/);
     assert.equal(reopened.getPermitByIdempotencyKey('idem-job-1').permitId, issued.permitId);
     reopened.close();
   });
@@ -188,5 +232,23 @@ test('expired approval is rejected without consumption', async () => {
     );
     assert.equal(ledger.getApproval('approval-1').status, 'approved');
     ledger.close();
+  });
+});
+
+test('key revocation is rechecked when claiming a stored approval', async () => {
+  await withLedger(({ dbPath, open }) => {
+    const initial = open();
+    initial.registerApproval({ approval: approval(), now: NOW });
+    initial.close();
+
+    const revoked = new SqliteClaimLedger(dbPath, {
+      approvalVerifier: createTestTrustStore({ status: 'revoked' })
+    });
+    assert.throws(
+      () => revoked.claimDispatchPermit({ expected: expected(), now: NOW }),
+      (error) => error instanceof ClaimLedgerError && error.code === 'GATEKEEPER_KEY_REVOKED'
+    );
+    assert.equal(revoked.getApproval('approval-1').status, 'approved');
+    revoked.close();
   });
 });
