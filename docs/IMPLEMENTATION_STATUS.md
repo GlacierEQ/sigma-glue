@@ -1,6 +1,6 @@
 # Implementation status
 
-## Verified in the first hardened runnable slice
+## Verified core
 
 - Deterministic SHA-256 plan fingerprinting with key-order independence
 - Rejection of undefined, non-finite, cyclic, sparse, accessor-backed, symbol-keyed, and non-plain plan values
@@ -10,23 +10,33 @@
 - Reachable `skipped` semantics before dispatch
 - Separation of provider confirmation from reconciliation
 
+## Verified durable authority handoff
+
+- File-backed SQLite approval and idempotency ledger
+- Atomic approval validation, idempotency claim, approval consumption, and permit issuance
+- Idempotent replay returns the original persisted permit
+- Changed content under a reused idempotency key fails closed
+- Approval reuse under a different idempotency key fails closed
+- Full transaction rollback after a forced post-consumption insertion failure
+- Persistence across database close and reopen
+- Eight competing Node processes converge on one claim and one permit
+
 ## Verification
 
 ```text
-9 tests passed
+17 tests passed
 0 tests failed
 ```
 
 ## Not yet implemented or verified
 
-- Durable storage
-- Gatekeeper approval consumption and single-use ledger
+- Gatekeeper transport and authenticity verification
 - Colossus adapter and dispatch
+- Distributed or multi-host consensus
 - Scope negotiation and no-broadening enforcement
-- Idempotency ledger and retry coordination
 - Provider-backed confirmation/reconciliation
 - Redacted diagnostics
 - Platform capability adapters
-- Offline/resume behavior
+- Offline/resume behavior above the ledger layer
 
-This slice authorizes and executes nothing by itself.
+The ledger issues an exact expiring permit but performs no provider or filesystem operation by itself.
