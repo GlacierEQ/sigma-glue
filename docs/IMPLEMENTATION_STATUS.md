@@ -62,8 +62,9 @@
 ## Verification
 
 ```text
-46 tests expected in this tranche
-GitHub merge-commit verification required before merge
+46 tests passed
+0 tests failed
+GitHub merge-commit verification: success
 ```
 
 ## Not yet implemented or verified
