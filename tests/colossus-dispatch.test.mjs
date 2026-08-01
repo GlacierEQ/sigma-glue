@@ -9,6 +9,10 @@ import {
   ColossusDispatchAdapter,
   ColossusDispatchError
 } from '../src/dispatch/colossus-dispatch-adapter.mjs';
+import {
+  createTestTrustStore,
+  signTestApproval
+} from './helpers/gatekeeper-fixture.mjs';
 
 const NOW = new Date('2026-08-01T22:00:00.000Z');
 const REGISTRY = Object.freeze({
@@ -19,7 +23,7 @@ const REGISTRY = Object.freeze({
 });
 
 function approval() {
-  return {
+  return signTestApproval({
     approvalId: 'approval-1',
     jobId: 'job-1',
     planFingerprint: 'sha256:plan-1',
@@ -30,7 +34,7 @@ function approval() {
     issuedAt: '2026-08-01T21:55:00.000Z',
     expiresAt: '2026-08-01T22:30:00.000Z',
     status: 'approved'
-  };
+  });
 }
 
 function subject() {
@@ -72,7 +76,9 @@ function request(overrides = {}) {
 
 async function withPermit(run) {
   const dir = await mkdtemp(join(tmpdir(), 'sigma-glue-colossus-'));
-  const ledger = new SqliteClaimLedger(join(dir, 'claims.sqlite'));
+  const ledger = new SqliteClaimLedger(join(dir, 'claims.sqlite'), {
+    approvalVerifier: createTestTrustStore()
+  });
   try {
     ledger.registerApproval({ approval: approval(), now: NOW });
     const permit = ledger.claimDispatchPermit({ expected: subject(), now: NOW });
