@@ -59,7 +59,7 @@
 - HTTP status, JSON content type, response shape, and response-size enforcement
 - Error-body suppression and broker-error redaction
 
-## Durable execution and reconciliation tranche
+## Verified durable execution and reconciliation
 
 - Separate durable states for `dispatched`, `attempted`, `provider_confirmed`, `reconciling`, and `reconciled`
 - Reconciliation mismatch terminates as `recovery_required`
@@ -77,8 +77,9 @@
 ## Verification
 
 ```text
-62 tests expected in this tranche
-GitHub merge-commit verification required before merge
+62 tests passed
+0 tests failed
+GitHub merge-commit verification: success
 ```
 
 ## Not yet implemented or verified
