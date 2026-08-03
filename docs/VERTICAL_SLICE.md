@@ -27,6 +27,8 @@ normalized request
 - Deep-freeze and integrity checks prevent post-approval plan mutation.
 - Provider and reconciliation evidence must bind to the approved plan subject.
 - Conflicting item paths, idempotency payload reuse, ambiguous fingerprint values, and symlinked paths fail closed.
+- Optional local persistence writes atomic, restart-readable job snapshots and redacted NDJSON audit receipts.
+- Persistence tests verify lifecycle recovery from disk and exclude raw plan paths and credential-like fields.
 
 ## Boundary
 

@@ -21,10 +21,13 @@
 - Duplicate/overlapping item plans rejected before filesystem execution
 - Ambiguous non-plain fingerprint inputs rejected
 - Symlinked test-root paths rejected without mutation
+- Local durable job snapshots with atomic replacement and restart-readable records
+- Redacted NDJSON audit receipts for lifecycle transitions, outcomes, and failures
+- Persistence tests prove raw plan paths and credential-like fields are not written
 
 ## Not yet implemented or verified
 
-- Durable storage
+- Production-grade durable storage
 - Live Gatekeeper and Colossus adapters
 - Scope negotiation and no-broadening enforcement beyond registry declarations
 - Production idempotency ledger

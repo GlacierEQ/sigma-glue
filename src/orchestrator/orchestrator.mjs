@@ -42,16 +42,23 @@ export class OrchestratorError extends Error {
 }
 
 export class SigmaOrchestrator {
-  constructor({ registry, gatekeeper, commander, policyVersion = 'policy-v1', now = () => new Date() }) {
+  constructor({ registry, gatekeeper, commander, store = null, policyVersion = 'policy-v1', now = () => new Date() }) {
     this.registry = registry;
     this.gatekeeper = gatekeeper;
     this.commander = commander;
+    this.store = store;
     this.policyVersion = policyVersion;
     this.now = now;
   }
 
   metadata(fingerprint, reasonCode) {
     return { actor: ACTOR, reasonCode, inputFingerprint: fingerprint, policyVersion: this.policyVersion, at: this.now().toISOString() };
+  }
+
+  async advance(job, toState, metadata) {
+    const next = transition(job, toState, metadata);
+    if (this.store?.recordTransition) await this.store.recordTransition(next);
+    return next;
   }
 
   async move(input) {
@@ -63,17 +70,17 @@ export class SigmaOrchestrator {
     const isRecovery = Boolean(initialJob);
     const requestFingerprint = request.requestFingerprint || planFingerprint(request);
     try {
-      job = transition(job, isRecovery ? 'recovery_required' : 'normalized', this.metadata(requestFingerprint, isRecovery ? 'RECOVERY_REQUESTED' : 'REQUEST_NORMALIZED'));
+      job = await this.advance(job, isRecovery ? 'recovery_required' : 'normalized', this.metadata(requestFingerprint, isRecovery ? 'RECOVERY_REQUESTED' : 'REQUEST_NORMALIZED'));
       // Registry operations are the federation method surface; the request's
       // business operation (for example, move) remains in the plan subject.
       const component = this.registry.assertSupports(request.componentRef, { operation: method, method });
       if (component.protocolVersion !== request.protocolVersion) throw new OrchestratorError('request protocol version is incompatible', 'PROTOCOL_VERSION_UNSUPPORTED', job);
-      job = transition(job, 'capability_checked', this.metadata(requestFingerprint, 'CAPABILITY_CHECKED'));
+      job = await this.advance(job, 'capability_checked', this.metadata(requestFingerprint, 'CAPABILITY_CHECKED'));
       const plan = planFactory(request);
       assertPlanIntegrity(plan);
       job = { ...job, planFingerprint: plan.planFingerprint };
-      job = transition(job, 'planned', this.metadata(plan.planFingerprint, 'PLAN_CREATED'));
-      job = transition(job, 'awaiting_approval', this.metadata(plan.planFingerprint, 'APPROVAL_REQUESTED'));
+      job = await this.advance(job, 'planned', this.metadata(plan.planFingerprint, 'PLAN_CREATED'));
+      job = await this.advance(job, 'awaiting_approval', this.metadata(plan.planFingerprint, 'APPROVAL_REQUESTED'));
       const approval = await this.gatekeeper.requestApproval({ jobId: request.jobId, componentRef: request.componentRef, method, operation, plan });
       assertApprovalBinding({
         approval,
@@ -88,22 +95,28 @@ export class SigmaOrchestrator {
         now: this.now()
       });
       assertPlanIntegrity(plan);
-      job = transition(job, 'approved', this.metadata(plan.planFingerprint, 'APPROVAL_BOUND'));
-      job = transition(job, 'dispatched', this.metadata(plan.planFingerprint, 'DISPATCHED_THROUGH_COMMANDER'));
+      job = await this.advance(job, 'approved', this.metadata(plan.planFingerprint, 'APPROVAL_BOUND'));
+      job = await this.advance(job, 'dispatched', this.metadata(plan.planFingerprint, 'DISPATCHED_THROUGH_COMMANDER'));
       const receipt = method === 'compensate'
         ? await this.commander.compensate(plan, { idempotencyKey: plan.idempotencyKey })
         : await this.commander.execute(plan, { idempotencyKey: plan.idempotencyKey });
-      job = transition(job, 'attempted', this.metadata(plan.planFingerprint, 'EXECUTION_ATTEMPTED'));
+      job = await this.advance(job, 'attempted', this.metadata(plan.planFingerprint, 'EXECUTION_ATTEMPTED'));
       assertEvidenceBinding(receipt, 'provider_confirmed', plan, 'PROVIDER_RESULT_UNCONFIRMED');
-      job = transition(job, 'provider_confirmed', this.metadata(plan.planFingerprint, 'PROVIDER_CONFIRMED'));
-      job = transition(job, 'reconciling', this.metadata(plan.planFingerprint, 'RECONCILIATION_STARTED'));
+      job = await this.advance(job, 'provider_confirmed', this.metadata(plan.planFingerprint, 'PROVIDER_CONFIRMED'));
+      job = await this.advance(job, 'reconciling', this.metadata(plan.planFingerprint, 'RECONCILIATION_STARTED'));
       const reconciliation = await this.commander.reconcile(plan);
       assertEvidenceBinding(reconciliation, 'reconciled', plan, 'RECONCILIATION_FAILED');
-      job = transition(job, 'reconciled', this.metadata(plan.planFingerprint, 'RECONCILED'));
+      job = await this.advance(job, 'reconciled', this.metadata(plan.planFingerprint, 'RECONCILED'));
+      if (this.store?.recordOutcome) await this.store.recordOutcome({ job, receipt, reconciliation });
       return Object.freeze({ job, plan, approval: { approvalId: approval.approvalId }, receipt, reconciliation });
     } catch (error) {
-      if (error instanceof OrchestratorError) throw error;
-      throw new OrchestratorError(error.message, error.code || 'ORCHESTRATOR_FAILED', job);
+      const failure = error instanceof OrchestratorError
+        ? error
+        : new OrchestratorError(error.message, error.code || 'ORCHESTRATOR_FAILED', job);
+      if (this.store?.recordFailure && job) {
+        try { await this.store.recordFailure(job, failure); } catch { /* preserve the original failure */ }
+      }
+      throw failure;
     }
   }
 
