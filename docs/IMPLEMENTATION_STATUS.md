@@ -27,6 +27,8 @@
 - Colossus gateway is now a required orchestrator boundary; direct Commander dispatch is rejected
 - Fixture adapter contract checks protocol, component, approval, idempotency, and credential-field boundaries
 - Gateway routing and missing-gateway fail-closed behavior are covered by tests
+- Local filesystem idempotency claims are restart-readable and reject mismatched key reuse
+- Idempotency completion records contain only bound evidence summaries
 
 ## Not yet implemented or verified
 
