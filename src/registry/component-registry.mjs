@@ -1,3 +1,5 @@
+import { deepFreeze } from '../plan/fingerprint.mjs';
+
 export class ComponentRegistryError extends Error {
   constructor(message, code = 'COMPONENT_REGISTRY_ERROR') {
     super(message);
@@ -22,7 +24,7 @@ export class ComponentRegistry {
     if (this.components.has(component.ref)) {
       throw new ComponentRegistryError(`component is already registered: ${component.ref}`, 'COMPONENT_DUPLICATE');
     }
-    this.components.set(component.ref, Object.freeze(structuredClone(component)));
+    this.components.set(component.ref, deepFreeze(structuredClone(component)));
     return this.components.get(component.ref);
   }
 
@@ -34,11 +36,11 @@ export class ComponentRegistry {
 
   assertSupports(ref, { operation, method }) {
     const component = this.resolve(ref);
-    if (!component.supportedMethods?.[method]) {
-      throw new ComponentRegistryError(`${ref} does not support method ${method}`, 'METHOD_UNSUPPORTED');
-    }
-    if (!component.allowedOperations?.includes(operation)) {
+    if (typeof operation !== 'string' || !component.allowedOperations?.includes(operation)) {
       throw new ComponentRegistryError(`${ref} does not allow operation ${operation}`, 'OPERATION_UNSUPPORTED');
+    }
+    if (typeof method !== 'string' || component.supportedMethods?.[method] !== true) {
+      throw new ComponentRegistryError(`${ref} does not support method ${method}`, 'METHOD_UNSUPPORTED');
     }
     return component;
   }

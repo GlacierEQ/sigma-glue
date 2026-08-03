@@ -5,6 +5,33 @@ import { transition } from '../state/state-machine.mjs';
 
 const ACTOR = 'sigma-orchestrator';
 
+function subjectFingerprint(plan) {
+  const { planFingerprint: _ignored, ...subject } = plan;
+  return planFingerprint(subject);
+}
+
+function assertPlanIntegrity(plan) {
+  if (!plan?.planFingerprint || subjectFingerprint(plan) !== plan.planFingerprint) {
+    throw new OrchestratorError('plan changed after fingerprinting', 'PLAN_FINGERPRINT_MISMATCH');
+  }
+}
+
+function assertEvidenceBinding(evidence, expectedStatus, plan, failureCode) {
+  if (!evidence || evidence.status !== expectedStatus) {
+    throw new OrchestratorError(`expected ${expectedStatus} evidence`, failureCode);
+  }
+  const fields = {
+    planFingerprint: plan.planFingerprint,
+    provider: plan.provider.stableId,
+    idempotencyKey: plan.idempotencyKey
+  };
+  for (const [field, expected] of Object.entries(fields)) {
+    if (evidence[field] !== expected) {
+      throw new OrchestratorError(`${expectedStatus} evidence does not bind ${field}`, failureCode);
+    }
+  }
+}
+
 export class OrchestratorError extends Error {
   constructor(message, code = 'ORCHESTRATOR_FAILED', job = null) {
     super(message);
@@ -59,17 +86,18 @@ export class SigmaOrchestrator {
         },
         now: this.now()
       });
+      assertPlanIntegrity(plan);
       job = transition(job, 'approved', this.metadata(plan.planFingerprint, 'APPROVAL_BOUND'));
       job = transition(job, 'dispatched', this.metadata(plan.planFingerprint, 'DISPATCHED_THROUGH_COMMANDER'));
       const receipt = method === 'compensate'
         ? await this.commander.compensate(plan, { idempotencyKey: plan.idempotencyKey })
         : await this.commander.execute(plan, { idempotencyKey: plan.idempotencyKey });
       job = transition(job, 'attempted', this.metadata(plan.planFingerprint, 'EXECUTION_ATTEMPTED'));
-      if (receipt?.status !== 'provider_confirmed') throw new OrchestratorError('provider confirmation was not returned', 'PROVIDER_CONFIRMATION_MISSING', job);
+      assertEvidenceBinding(receipt, 'provider_confirmed', plan, 'PROVIDER_RESULT_UNCONFIRMED');
       job = transition(job, 'provider_confirmed', this.metadata(plan.planFingerprint, 'PROVIDER_CONFIRMED'));
       job = transition(job, 'reconciling', this.metadata(plan.planFingerprint, 'RECONCILIATION_STARTED'));
       const reconciliation = await this.commander.reconcile(plan);
-      if (reconciliation?.status !== 'reconciled') throw new OrchestratorError('reconciliation did not confirm the plan', 'RECONCILIATION_FAILED', job);
+      assertEvidenceBinding(reconciliation, 'reconciled', plan, 'RECONCILIATION_FAILED');
       job = transition(job, 'reconciled', this.metadata(plan.planFingerprint, 'RECONCILED'));
       return Object.freeze({ job, plan, approval: { approvalId: approval.approvalId }, receipt, reconciliation });
     } catch (error) {

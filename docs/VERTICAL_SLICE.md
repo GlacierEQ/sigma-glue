@@ -24,6 +24,9 @@ normalized request
 - Orchestrator lifecycle through `reconciled`.
 - Separate recovery plan and approval for compensation.
 - Tests for changed plans, path escape, repeated idempotency subject, reconciliation, and recovery.
+- Deep-freeze and integrity checks prevent post-approval plan mutation.
+- Provider and reconciliation evidence must bind to the approved plan subject.
+- Conflicting item paths, idempotency payload reuse, ambiguous fingerprint values, and symlinked paths fail closed.
 
 ## Boundary
 

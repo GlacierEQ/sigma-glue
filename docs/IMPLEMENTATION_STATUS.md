@@ -13,7 +13,14 @@
 - Test-root Commander execution with idempotency and rollback-on-partial-failure
 - Separate provider confirmation and reconciliation
 - Separately approved compensating recovery plan
-- 10/10 automated tests pass with `npm test`
+- 17/17 automated tests pass with `npm test`
+- Deep-frozen request, plan, and component capability snapshots
+- Plan-integrity recheck immediately before dispatch
+- Provider-confirmed and reconciled evidence bound to plan, provider, and idempotency key
+- Idempotency-key reuse with a different payload rejected
+- Duplicate/overlapping item plans rejected before filesystem execution
+- Ambiguous non-plain fingerprint inputs rejected
+- Symlinked test-root paths rejected without mutation
 
 ## Not yet implemented or verified
 
