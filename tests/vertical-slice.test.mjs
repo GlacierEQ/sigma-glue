@@ -7,6 +7,7 @@ import { ComponentRegistry } from '../src/registry/component-registry.mjs';
 import { normalizeMoveRequest } from '../src/protocol/request.mjs';
 import { SigmaOrchestrator, OrchestratorError } from '../src/orchestrator/orchestrator.mjs';
 import { TestRootCommander } from '../src/runtime/test-root-commander.mjs';
+import { TestRootColossusGateway } from '../src/runtime/test-root-colossus.mjs';
 import { planFingerprint } from '../src/plan/fingerprint.mjs';
 
 const component = {
@@ -19,6 +20,7 @@ let root;
 let outside;
 let registry;
 let commander;
+let colossus;
 let orchestrator;
 let approvals;
 
@@ -36,7 +38,8 @@ beforeEach(async () => {
     return approval;
   }};
   commander = new TestRootCommander(root);
-  orchestrator = new SigmaOrchestrator({ registry, gatekeeper, commander });
+  colossus = new TestRootColossusGateway({ commander, componentRef: component.ref });
+  orchestrator = new SigmaOrchestrator({ registry, gatekeeper, colossus });
 });
 
 afterEach(async () => {
@@ -103,7 +106,7 @@ test('component capability snapshots cannot be broadened after registration', ()
 });
 
 test('rejects a Commander receipt bound to another plan', async () => {
-  orchestrator.commander = {
+  orchestrator.colossus.commander = {
     execute: async (plan) => ({ status: 'provider_confirmed', provider: plan.provider.stableId, operation: plan.operation, idempotencyKey: plan.idempotencyKey, planFingerprint: 'sha256:other' }),
     reconcile: async () => { throw new Error('reconcile must not run'); }
   };
@@ -111,7 +114,7 @@ test('rejects a Commander receipt bound to another plan', async () => {
 });
 
 test('rejects reconciliation evidence bound to another plan', async () => {
-  orchestrator.commander = {
+  orchestrator.colossus.commander = {
     execute: async (plan) => ({ status: 'provider_confirmed', provider: plan.provider.stableId, operation: plan.operation, idempotencyKey: plan.idempotencyKey, planFingerprint: plan.planFingerprint }),
     reconcile: async (plan) => ({ status: 'reconciled', provider: plan.provider.stableId, operation: plan.operation, idempotencyKey: plan.idempotencyKey, planFingerprint: 'sha256:other' })
   };

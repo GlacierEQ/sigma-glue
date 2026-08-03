@@ -21,6 +21,7 @@ normalized request
 - Normalized move request with stable provider/item identities and scoped relative paths.
 - Plan fingerprints included in the approval subject.
 - Test-root Commander fixture with path containment, idempotency, and compensating moves.
+- Required Colossus gateway boundary with fixture adapter contract checks; the Orchestrator cannot dispatch directly to Commander.
 - Orchestrator lifecycle through `reconciled`.
 - Separate recovery plan and approval for compensation.
 - Tests for changed plans, path escape, repeated idempotency subject, reconciliation, and recovery.

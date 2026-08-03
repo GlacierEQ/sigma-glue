@@ -13,7 +13,7 @@
 - Test-root Commander execution with idempotency and rollback-on-partial-failure
 - Separate provider confirmation and reconciliation
 - Separately approved compensating recovery plan
-- 17/17 automated tests pass with `npm test`
+- 22/22 automated tests pass with `npm test`
 - Deep-frozen request, plan, and component capability snapshots
 - Plan-integrity recheck immediately before dispatch
 - Provider-confirmed and reconciled evidence bound to plan, provider, and idempotency key
@@ -24,14 +24,16 @@
 - Local durable job snapshots with atomic replacement and restart-readable records
 - Redacted NDJSON audit receipts for lifecycle transitions, outcomes, and failures
 - Persistence tests prove raw plan paths and credential-like fields are not written
+- Colossus gateway is now a required orchestrator boundary; direct Commander dispatch is rejected
+- Fixture adapter contract checks protocol, component, approval, idempotency, and credential-field boundaries
+- Gateway routing and missing-gateway fail-closed behavior are covered by tests
 
 ## Not yet implemented or verified
 
-- Production-grade durable storage
+- Production-grade durable storage and encrypted-at-rest records
 - Live Gatekeeper and Colossus adapters
 - Scope negotiation and no-broadening enforcement beyond registry declarations
 - Production idempotency ledger
 - Live provider confirmation/reconciliation
-- Redacted diagnostics and durable audit receipts
 - Platform capability adapters
 - Offline/resume behavior

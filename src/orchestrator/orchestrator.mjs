@@ -42,10 +42,13 @@ export class OrchestratorError extends Error {
 }
 
 export class SigmaOrchestrator {
-  constructor({ registry, gatekeeper, commander, store = null, policyVersion = 'policy-v1', now = () => new Date() }) {
+  constructor({ registry, gatekeeper, colossus, store = null, policyVersion = 'policy-v1', now = () => new Date() }) {
+    if (!colossus || typeof colossus.dispatch !== 'function' || typeof colossus.reconcile !== 'function') {
+      throw new TypeError('Colossus gateway with dispatch and reconcile is required');
+    }
     this.registry = registry;
     this.gatekeeper = gatekeeper;
-    this.commander = commander;
+    this.colossus = colossus;
     this.store = store;
     this.policyVersion = policyVersion;
     this.now = now;
@@ -96,15 +99,27 @@ export class SigmaOrchestrator {
       });
       assertPlanIntegrity(plan);
       job = await this.advance(job, 'approved', this.metadata(plan.planFingerprint, 'APPROVAL_BOUND'));
-      job = await this.advance(job, 'dispatched', this.metadata(plan.planFingerprint, 'DISPATCHED_THROUGH_COMMANDER'));
-      const receipt = method === 'compensate'
-        ? await this.commander.compensate(plan, { idempotencyKey: plan.idempotencyKey })
-        : await this.commander.execute(plan, { idempotencyKey: plan.idempotencyKey });
+      job = await this.advance(job, 'dispatched', this.metadata(plan.planFingerprint, 'DISPATCHED_THROUGH_COLOSSUS'));
+      const receipt = await this.colossus.dispatch({
+        jobId: request.jobId,
+        componentRef: request.componentRef,
+        operation,
+        method,
+        plan,
+        approval
+      });
       job = await this.advance(job, 'attempted', this.metadata(plan.planFingerprint, 'EXECUTION_ATTEMPTED'));
       assertEvidenceBinding(receipt, 'provider_confirmed', plan, 'PROVIDER_RESULT_UNCONFIRMED');
       job = await this.advance(job, 'provider_confirmed', this.metadata(plan.planFingerprint, 'PROVIDER_CONFIRMED'));
       job = await this.advance(job, 'reconciling', this.metadata(plan.planFingerprint, 'RECONCILIATION_STARTED'));
-      const reconciliation = await this.commander.reconcile(plan);
+      const reconciliation = await this.colossus.reconcile({
+        jobId: request.jobId,
+        componentRef: request.componentRef,
+        operation,
+        method,
+        plan,
+        approval
+      });
       assertEvidenceBinding(reconciliation, 'reconciled', plan, 'RECONCILIATION_FAILED');
       job = await this.advance(job, 'reconciled', this.metadata(plan.planFingerprint, 'RECONCILED'));
       if (this.store?.recordOutcome) await this.store.recordOutcome({ job, receipt, reconciliation });

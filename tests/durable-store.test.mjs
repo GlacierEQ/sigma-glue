@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { ComponentRegistry } from '../src/registry/component-registry.mjs';
 import { SigmaOrchestrator } from '../src/orchestrator/orchestrator.mjs';
 import { TestRootCommander } from '../src/runtime/test-root-commander.mjs';
+import { TestRootColossusGateway } from '../src/runtime/test-root-colossus.mjs';
 import { DurableJobStore } from '../src/persistence/durable-store.mjs';
 
 const component = {
@@ -24,10 +25,11 @@ test('persists restart-readable lifecycle records without raw plan data', async 
     registry.register(component);
     const store = new DurableJobStore(storage);
     const commander = new TestRootCommander(root);
+    const colossus = new TestRootColossusGateway({ commander, componentRef: component.ref });
     const orchestrator = new SigmaOrchestrator({
       registry,
       store,
-      commander,
+      colossus,
       gatekeeper: { requestApproval: async ({ jobId, componentRef, method, plan }) => ({
         approvalId: 'approval-durable-1', status: 'approved', jobId, componentRef, method,
         idempotencyKey: plan.idempotencyKey, planFingerprint: plan.planFingerprint,
