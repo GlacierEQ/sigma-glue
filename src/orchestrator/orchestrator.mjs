@@ -31,11 +31,12 @@ export class SigmaOrchestrator {
     return this.dispatch(normalizeMoveRequest(input), { planFactory: makeMovePlan, operation: 'move', method: 'execute' });
   }
 
-  async dispatch(request, { planFactory, operation, method }) {
-    let job = { jobId: request.jobId, state: 'received', history: [], componentRef: request.componentRef, operation };
+  async dispatch(request, { planFactory, operation, method, initialJob = null }) {
+    let job = initialJob || { jobId: request.jobId, state: 'received', history: [], componentRef: request.componentRef, operation };
+    const isRecovery = Boolean(initialJob);
     const requestFingerprint = request.requestFingerprint || planFingerprint(request);
     try {
-      job = transition(job, 'normalized', this.metadata(requestFingerprint, 'REQUEST_NORMALIZED'));
+      job = transition(job, isRecovery ? 'recovery_required' : 'normalized', this.metadata(requestFingerprint, isRecovery ? 'RECOVERY_REQUESTED' : 'REQUEST_NORMALIZED'));
       // Registry operations are the federation method surface; the request's
       // business operation (for example, move) remains in the plan subject.
       const component = this.registry.assertSupports(request.componentRef, { operation: method, method });

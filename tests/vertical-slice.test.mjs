@@ -69,6 +69,7 @@ test('compensates a reconciled move with a separately approved recovery plan', a
   const result = await orchestrator.move(request());
   const recovery = await orchestrator.compensate(result);
   assert.equal(recovery.job.state, 'reconciled');
+  assert.deepEqual(recovery.job.history.slice(-10).map((entry) => entry.toState), ['recovery_required', 'capability_checked', 'planned', 'awaiting_approval', 'approved', 'dispatched', 'attempted', 'provider_confirmed', 'reconciling', 'reconciled']);
   assert.equal(recovery.plan.operation, 'compensate');
   assert.equal(await readFile(join(root, 'inbox', 'note.txt'), 'utf8'), 'hello Sigma\n');
   await assert.rejects(() => readFile(join(root, 'archive', 'note.txt')));
