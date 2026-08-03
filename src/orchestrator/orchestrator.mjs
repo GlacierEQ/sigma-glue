@@ -70,6 +70,7 @@ export class SigmaOrchestrator {
       if (component.protocolVersion !== request.protocolVersion) throw new OrchestratorError('request protocol version is incompatible', 'PROTOCOL_VERSION_UNSUPPORTED', job);
       job = transition(job, 'capability_checked', this.metadata(requestFingerprint, 'CAPABILITY_CHECKED'));
       const plan = planFactory(request);
+      assertPlanIntegrity(plan);
       job = { ...job, planFingerprint: plan.planFingerprint };
       job = transition(job, 'planned', this.metadata(plan.planFingerprint, 'PLAN_CREATED'));
       job = transition(job, 'awaiting_approval', this.metadata(plan.planFingerprint, 'APPROVAL_REQUESTED'));
