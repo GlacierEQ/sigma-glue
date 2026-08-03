@@ -13,7 +13,7 @@
 - Test-root Commander execution with idempotency and rollback-on-partial-failure
 - Separate provider confirmation and reconciliation
 - Separately approved compensating recovery plan
-- 22/22 automated tests pass with `npm test`
+- 24/24 automated tests pass with `npm test`
 - Deep-frozen request, plan, and component capability snapshots
 - Plan-integrity recheck immediately before dispatch
 - Provider-confirmed and reconciled evidence bound to plan, provider, and idempotency key
@@ -33,7 +33,7 @@
 - Production-grade durable storage and encrypted-at-rest records
 - Live Gatekeeper and Colossus adapters
 - Scope negotiation and no-broadening enforcement beyond registry declarations
-- Production idempotency ledger
+- Multi-process/production idempotency ledger and provider-side duplicate suppression
 - Live provider confirmation/reconciliation
 - Platform capability adapters
 - Offline/resume behavior

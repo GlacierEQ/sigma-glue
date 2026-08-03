@@ -8,6 +8,7 @@ import { SigmaOrchestrator } from '../src/orchestrator/orchestrator.mjs';
 import { TestRootCommander } from '../src/runtime/test-root-commander.mjs';
 import { TestRootColossusGateway } from '../src/runtime/test-root-colossus.mjs';
 import { DurableJobStore } from '../src/persistence/durable-store.mjs';
+import { DurableIdempotencyLedger } from '../src/persistence/idempotency-ledger.mjs';
 
 const component = {
   name: 'commander-test-root', ref: 'commander-test-root@v1', protocolVersion: 'sigma-federation/v1',
@@ -26,9 +27,11 @@ test('persists restart-readable lifecycle records without raw plan data', async 
     const store = new DurableJobStore(storage);
     const commander = new TestRootCommander(root);
     const colossus = new TestRootColossusGateway({ commander, componentRef: component.ref });
+    const ledger = new DurableIdempotencyLedger(join(storage, 'idempotency'));
     const orchestrator = new SigmaOrchestrator({
       registry,
       store,
+      ledger,
       colossus,
       gatekeeper: { requestApproval: async ({ jobId, componentRef, method, plan }) => ({
         approvalId: 'approval-durable-1', status: 'approved', jobId, componentRef, method,

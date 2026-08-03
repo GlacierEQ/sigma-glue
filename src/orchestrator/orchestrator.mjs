@@ -42,7 +42,7 @@ export class OrchestratorError extends Error {
 }
 
 export class SigmaOrchestrator {
-  constructor({ registry, gatekeeper, colossus, store = null, policyVersion = 'policy-v1', now = () => new Date() }) {
+  constructor({ registry, gatekeeper, colossus, store = null, ledger = null, policyVersion = 'policy-v1', now = () => new Date() }) {
     if (!colossus || typeof colossus.dispatch !== 'function' || typeof colossus.reconcile !== 'function') {
       throw new TypeError('Colossus gateway with dispatch and reconcile is required');
     }
@@ -50,6 +50,7 @@ export class SigmaOrchestrator {
     this.gatekeeper = gatekeeper;
     this.colossus = colossus;
     this.store = store;
+    this.ledger = ledger;
     this.policyVersion = policyVersion;
     this.now = now;
   }
@@ -98,6 +99,7 @@ export class SigmaOrchestrator {
         now: this.now()
       });
       assertPlanIntegrity(plan);
+      if (this.ledger?.claim) await this.ledger.claim(plan, this.now().toISOString());
       job = await this.advance(job, 'approved', this.metadata(plan.planFingerprint, 'APPROVAL_BOUND'));
       job = await this.advance(job, 'dispatched', this.metadata(plan.planFingerprint, 'DISPATCHED_THROUGH_COLOSSUS'));
       const receipt = await this.colossus.dispatch({
@@ -123,6 +125,7 @@ export class SigmaOrchestrator {
       assertEvidenceBinding(reconciliation, 'reconciled', plan, 'RECONCILIATION_FAILED');
       job = await this.advance(job, 'reconciled', this.metadata(plan.planFingerprint, 'RECONCILED'));
       if (this.store?.recordOutcome) await this.store.recordOutcome({ job, receipt, reconciliation });
+      if (this.ledger?.complete) await this.ledger.complete(plan, { receipt, reconciliation, now: job.updatedAt });
       return Object.freeze({ job, plan, approval: { approvalId: approval.approvalId }, receipt, reconciliation });
     } catch (error) {
       const failure = error instanceof OrchestratorError
