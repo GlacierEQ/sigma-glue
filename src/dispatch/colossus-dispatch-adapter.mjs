@@ -68,9 +68,15 @@ export class ColossusDispatchAdapter {
       throw new ColossusDispatchError('schema version is incompatible', 'SCHEMA_VERSION_INCOMPATIBLE');
     }
     assertExactBinding(normalizedPermit, normalizedRequest);
-    validateScopedHandles(normalizedRequest.scopedHandles, now, normalizedPermit.expiresAt);
 
     const route = resolveRoute(this.#registry, normalizedRequest);
+    validateScopedHandles(
+      normalizedRequest.scopedHandles,
+      now,
+      normalizedPermit.expiresAt,
+      normalizedRequest,
+      route.authorityPolicy
+    );
     rejectSecretShapedContent(normalizedRequest.payload, '$.payload');
     rejectSecretShapedContent(normalizedRequest.scopedHandles, '$.scopedHandles');
 
