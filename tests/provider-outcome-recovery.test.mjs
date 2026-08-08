@@ -29,7 +29,8 @@ function uncertainty(overrides = {}) {
     baseline: {
       exists: true,
       contentFingerprint: BASELINE,
-      version: 'blob-baseline-1'
+      version: 'blob-baseline-1',
+      versionSemantics: 'content_addressed'
     },
     ...overrides
   };
@@ -42,12 +43,13 @@ function coordinator(observation) {
   });
 }
 
-test('desired provider fingerprint proves applied and forbids replay', async () => {
+test('desired provider fingerprint proves the desired state is applied and forbids replay', async () => {
   const result = await coordinator({
     target: TARGET,
     exists: true,
     contentFingerprint: DESIRED,
     version: 'blob-desired-1',
+    versionSemantics: 'content_addressed',
     providerRequestId: 'req-provider-1'
   }).recover({ uncertainty: uncertainty() });
 
@@ -57,34 +59,63 @@ test('desired provider fingerprint proves applied and forbids replay', async () 
   assert.match(providerRecoveryFingerprint(result), /^sha256:[0-9a-f]{64}$/);
 });
 
-test('exact baseline proves not applied but requires new authorization', async () => {
+test('exact monotonic baseline proves not applied but requires new authorization', async () => {
+  const monotonicBaseline = {
+    exists: true,
+    contentFingerprint: BASELINE,
+    version: 'revision-41',
+    versionSemantics: 'monotonic_revision'
+  };
+  const result = await coordinator({
+    target: TARGET,
+    exists: true,
+    contentFingerprint: BASELINE,
+    version: 'revision-41',
+    versionSemantics: 'monotonic_revision',
+    providerRequestId: 'req-provider-2'
+  }).recover({ uncertainty: uncertainty({ baseline: monotonicBaseline }) });
+
+  assert.equal(result.state, 'confirmed_not_applied');
+  assert.equal(result.retryDisposition, 'requires_new_authorization');
+  assert.equal(result.reasonCode, 'BASELINE_MONOTONIC_REVISION_UNCHANGED');
+});
+
+test('restored content-addressed baseline remains unknown because history is not monotonic', async () => {
   const result = await coordinator({
     target: TARGET,
     exists: true,
     contentFingerprint: BASELINE,
     version: 'blob-baseline-1',
-    providerRequestId: 'req-provider-2'
+    versionSemantics: 'content_addressed',
+    providerRequestId: 'req-provider-restored'
   }).recover({ uncertainty: uncertainty() });
 
-  assert.equal(result.state, 'confirmed_not_applied');
-  assert.equal(result.retryDisposition, 'requires_new_authorization');
-  assert.equal(result.reasonCode, 'BASELINE_FINGERPRINT_OBSERVED');
+  assert.equal(result.state, 'still_unknown');
+  assert.equal(result.retryDisposition, 'forbidden_until_resolved');
+  assert.equal(result.reasonCode, 'BASELINE_RESTORATION_AMBIGUOUS');
 });
 
-test('missing target proves not applied when the approved baseline was missing', async () => {
+test('missing target after a missing baseline does not prove the mutation never happened', async () => {
   const result = await coordinator({
     target: TARGET,
     exists: false,
     contentFingerprint: null,
-    version: null
+    version: null,
+    versionSemantics: 'unknown'
   }).recover({
     uncertainty: uncertainty({
-      baseline: { exists: false, contentFingerprint: null, version: null }
+      baseline: {
+        exists: false,
+        contentFingerprint: null,
+        version: null,
+        versionSemantics: 'unknown'
+      }
     })
   });
 
-  assert.equal(result.state, 'confirmed_not_applied');
-  assert.equal(result.retryDisposition, 'requires_new_authorization');
+  assert.equal(result.state, 'still_unknown');
+  assert.equal(result.retryDisposition, 'forbidden_until_resolved');
+  assert.equal(result.reasonCode, 'ABSENCE_HISTORY_UNPROVEN');
 });
 
 test('diverged provider state freezes recovery and forbids replay', async () => {
@@ -92,7 +123,8 @@ test('diverged provider state freezes recovery and forbids replay', async () => 
     target: TARGET,
     exists: true,
     contentFingerprint: 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
-    version: 'blob-third-party-1'
+    version: 'blob-third-party-1',
+    versionSemantics: 'content_addressed'
   }).recover({ uncertainty: uncertainty() });
 
   assert.equal(result.state, 'still_unknown');
@@ -124,19 +156,21 @@ test('cross-target observation is rejected rather than misclassified', async () 
       target: { ...TARGET, path: '.sigma-provider-canary/other.json' },
       exists: true,
       contentFingerprint: DESIRED,
-      version: 'blob-other-1'
+      version: 'blob-other-1',
+      versionSemantics: 'content_addressed'
     }).recover({ uncertainty: uncertainty() }),
     (error) => error instanceof ProviderOutcomeRecoveryError &&
       error.code === 'PROVIDER_OBSERVATION_TARGET_MISMATCH'
   );
 });
 
-test('recovery fingerprints are canonical and stable', async () => {
+test('recovery fingerprints are canonical and include version semantics', async () => {
   const result = await coordinator({
     target: TARGET,
     exists: true,
     contentFingerprint: DESIRED,
-    version: 'blob-desired-1'
+    version: 'blob-desired-1',
+    versionSemantics: 'content_addressed'
   }).recover({ uncertainty: uncertainty() });
 
   assert.equal(providerRecoveryFingerprint(result), planFingerprint({
@@ -146,4 +180,6 @@ test('recovery fingerprints are canonical and stable', async () => {
     uncertainty: result.uncertainty,
     observation: result.observation
   }));
+  assert.equal(result.uncertainty.baseline.versionSemantics, 'content_addressed');
+  assert.equal(result.observation.versionSemantics, 'content_addressed');
 });
