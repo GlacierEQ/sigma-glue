@@ -65,10 +65,9 @@ function fakeBroker(state, { loseNextPutResponse = false } = {}) {
   let lose = loseNextPutResponse;
   return {
     supportsOpaqueHandles: true,
-    async authorizedFetch({ url, request }) {
+    async authorizedFetch({ request }) {
       state.requestSequence += 1;
       const headers = { 'content-type': 'application/json', 'x-github-request-id': `REQ-${state.requestSequence}` };
-      const parsed = new URL(url);
       if (request.method === 'GET') {
         state.reads += 1;
         if (state.content === null) return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404, headers });
@@ -170,7 +169,6 @@ test('lost mutation response becomes recoverable confirmed_applied evidence', as
     requestId: 'request-github-provider-lost-1',
     idempotencyKey: 'idem-github-provider-lost-1'
   });
-  requestEnvelope.envelopeFingerprint = planFingerprint({ ...requestEnvelope, envelopeFingerprint: undefined });
   const transport = new GitHubContentsColossusTransport({
     credentialBroker: broker,
     credentialHandle: 'credh_testgithub3',
@@ -236,7 +234,7 @@ test('observation of unchanged baseline requires a new authorization rather than
   assert.equal(state.writes, 0);
 });
 
-test('desired fingerprint must exactly bind desired bytes', () => {
+test('desired fingerprint exactly binds desired bytes', () => {
   const valid = githubContentsIntent({
     target: TARGET,
     desiredContent: 'desired',
