@@ -101,6 +101,13 @@ function normalizeAuthorityPolicy(policy, label) {
       'COMPONENT_REGISTRY_INVALID'
     );
   }
+  if (!Array.isArray(policy.issuers) || policy.issuers.length === 0) {
+    throw new ColossusDispatchError(
+      `trusted scoped-handle issuers are missing for ${label}`,
+      'COMPONENT_REGISTRY_INVALID'
+    );
+  }
+
   const handles = policy.handles.map((handle, index) => {
     if (!handle || typeof handle !== 'object' || Array.isArray(handle)) {
       throw new ColossusDispatchError(
@@ -112,7 +119,36 @@ function normalizeAuthorityPolicy(policy, label) {
     const scope = requireString(handle.scope, 'scope', 'COMPONENT_REGISTRY_INVALID');
     return Object.freeze({ type, scope });
   });
-  return Object.freeze({ minHandles, maxHandles, handles: Object.freeze(handles) });
+
+  const issuerIdentities = new Set();
+  const issuers = policy.issuers.map((issuer, index) => {
+    if (!issuer || typeof issuer !== 'object' || Array.isArray(issuer)) {
+      throw new ColossusDispatchError(
+        `authority issuer ${index} is invalid for ${label}`,
+        'COMPONENT_REGISTRY_INVALID'
+      );
+    }
+    const normalized = Object.freeze({
+      issuer: requireString(issuer.issuer, 'issuer', 'COMPONENT_REGISTRY_INVALID'),
+      keyId: requireString(issuer.keyId, 'keyId', 'COMPONENT_REGISTRY_INVALID')
+    });
+    const identity = `${normalized.issuer}\u0000${normalized.keyId}`;
+    if (issuerIdentities.has(identity)) {
+      throw new ColossusDispatchError(
+        `duplicate authority issuer ${identity} for ${label}`,
+        'COMPONENT_REGISTRY_INVALID'
+      );
+    }
+    issuerIdentities.add(identity);
+    return normalized;
+  });
+
+  return Object.freeze({
+    minHandles,
+    maxHandles,
+    handles: Object.freeze(handles),
+    issuers: Object.freeze(issuers)
+  });
 }
 
 function boundedInteger(value, field, minimum) {
