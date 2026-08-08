@@ -10,7 +10,7 @@ const transitions = Object.freeze({
   normalized: ['capability_checked', 'blocked', 'cancelled'],
   capability_checked: ['planned', 'blocked', 'cancelled'],
   planned: ['awaiting_approval', 'blocked', 'cancelled'],
-  awaiting_approval: ['approved', 'expired', 'blocked', 'cancelled'],
+  awaiting_approval: ['approved', 'expired', 'recovery_required', 'blocked', 'cancelled'],
   approved: ['dispatched', 'expired', 'blocked', 'cancelled'],
   dispatched: ['attempted', 'failed', 'blocked', 'cancelled'],
   attempted: ['provider_confirmed', 'failed', 'recovery_required', 'blocked'],
