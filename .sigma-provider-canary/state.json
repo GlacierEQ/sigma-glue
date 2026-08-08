@@ -1,6 +1,6 @@
 {
   "schema": "sigma.provider-canary.v1",
-  "phase": "confirmed-write",
+  "phase": "lost-response-recovered",
   "candidateSha": "bbe1308c173686550586f68c53a0e85aee74137f",
   "runId": "31279671946"
 }
