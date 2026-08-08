@@ -1,3 +1,4 @@
+import { markProvablyPreProviderBoundary } from '../orchestrator/provider-boundary-proof.mjs';
 import { planFingerprint } from '../plan/fingerprint.mjs';
 
 export class VerifiedColossusGatewayError extends Error {
@@ -5,7 +6,6 @@ export class VerifiedColossusGatewayError extends Error {
     super(message, options);
     this.name = 'VerifiedColossusGatewayError';
     this.code = code;
-    this.providerBoundaryEntered = options?.providerBoundaryEntered ?? null;
   }
 }
 
@@ -288,11 +288,14 @@ export class VerifiedColossusGateway {
         providerBoundaryEntered = true;
       }
     }
-    return new VerifiedColossusGatewayError(
+    const classified = new VerifiedColossusGatewayError(
       error?.message || 'verified Colossus dispatch failed',
       error?.code || 'VERIFIED_COLOSSUS_DISPATCH_FAILED',
-      { cause: error, providerBoundaryEntered }
+      { cause: error }
     );
+    return providerBoundaryEntered
+      ? classified
+      : markProvablyPreProviderBoundary(classified);
   }
 
   #date() {
@@ -388,7 +391,7 @@ function orchestrationSubject(input) {
     idempotencyKey: requiredString(plan.idempotencyKey, 'idempotencyKey'),
     planFingerprint: requiredString(plan.planFingerprint, 'planFingerprint'),
     provider: requiredString(plan.provider?.stableId, 'provider.stableId'),
-    policyVersion: requiredString(approval.policyVersion, 'approval.policyVersion')
+    policyVersion: requiredString(input.approval.policyVersion, 'approval.policyVersion')
   };
   if (plan.componentRef !== subject.componentRef || plan.method !== subject.method ||
       plan.operation !== subject.operation || approval.jobId !== subject.jobId ||
