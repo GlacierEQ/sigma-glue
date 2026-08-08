@@ -11,7 +11,12 @@ on:
       - 'examples/colossus/github-contents-*.mjs'
       - 'scripts/github-provider-live-proof.mjs'
       - 'tests/github-contents-reference.test.mjs'
+      - 'tests/github-contents-hardening.test.mjs'
       - 'tests/provider-outcome-recovery.test.mjs'
+      - 'tests/provider-recovery-ledger.test.mjs'
+      - 'docs/PROVIDER_RECOVERY.md'
+      - 'docs/IMPLEMENTATION_STATUS.md'
+      - 'README.md'
       - '.github/workflows/github-provider-live-proof.yml'
 
 permissions:
