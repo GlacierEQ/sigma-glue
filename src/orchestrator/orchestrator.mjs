@@ -4,6 +4,7 @@ import { makeCompensationPlan, makeMovePlan, normalizeMoveRequest } from '../pro
 import { transition } from '../state/state-machine.mjs';
 
 const ACTOR = 'sigma-orchestrator';
+const RECOVERY_STATES = new Set(['dispatched', 'attempted', 'provider_confirmed', 'reconciling']);
 
 function subjectFingerprint(plan) {
   const { planFingerprint: _ignored, ...subject } = plan;
@@ -32,27 +33,22 @@ function assertEvidenceBinding(evidence, expectedStatus, plan, failureCode) {
   }
 }
 
-function assertDispatchClaim(claim, job) {
-  if (!claim?.reused) return;
-  const state = claim.record?.state;
-  if (state === 'completed') {
-    throw new OrchestratorError(
-      'idempotent operation already completed; mutation replay is blocked',
-      'IDEMPOTENCY_ALREADY_COMPLETED',
-      job
-    );
+function dispatchClaimDisposition(claim) {
+  if (!claim || typeof claim !== 'object' || typeof claim.reused !== 'boolean' || !claim.record || typeof claim.record !== 'object') {
+    throw new OrchestratorError('idempotency ledger returned a malformed claim', 'IDEMPOTENCY_LEDGER_STATE_INVALID');
   }
-  if (state === 'claimed') {
-    throw new OrchestratorError(
-      'idempotent operation is already claimed; reconcile the prior attempt before retrying',
-      'IDEMPOTENCY_RECOVERY_REQUIRED',
-      job
-    );
+  const state = claim.record.state;
+  if (claim.reused === false) {
+    if (state !== 'claimed') {
+      throw new OrchestratorError('fresh idempotency claim is not active', 'IDEMPOTENCY_LEDGER_STATE_INVALID');
+    }
+    return 'fresh';
   }
+  if (state === 'completed') return 'completed';
+  if (state === 'claimed') return 'claimed';
   throw new OrchestratorError(
     `idempotency ledger returned unsupported state: ${String(state)}`,
-    'IDEMPOTENCY_LEDGER_STATE_INVALID',
-    job
+    'IDEMPOTENCY_LEDGER_STATE_INVALID'
   );
 }
 
@@ -97,6 +93,8 @@ export class SigmaOrchestrator {
     let job = initialJob || { jobId: request.jobId, state: 'received', history: [], componentRef: request.componentRef, operation };
     const isRecovery = Boolean(initialJob);
     const requestFingerprint = request.requestFingerprint || planFingerprint(request);
+    let freshClaimPlan = null;
+    let providerBoundaryEntered = false;
     try {
       job = await this.advance(job, isRecovery ? 'recovery_required' : 'normalized', this.metadata(requestFingerprint, isRecovery ? 'RECOVERY_REQUESTED' : 'REQUEST_NORMALIZED'));
       // Registry operations are the federation method surface; the request's
@@ -133,10 +131,27 @@ export class SigmaOrchestrator {
       assertPlanIntegrity(plan);
       if (this.ledger?.claim) {
         const claim = await this.ledger.claim(plan, this.now().toISOString());
-        assertDispatchClaim(claim, job);
+        const disposition = dispatchClaimDisposition(claim);
+        if (disposition === 'claimed') {
+          job = await this.advance(job, 'recovery_required', this.metadata(plan.planFingerprint, 'IDEMPOTENCY_CLAIM_ALREADY_ACTIVE'));
+          throw new OrchestratorError(
+            'idempotent operation is already claimed; reconcile the prior attempt before retrying',
+            'IDEMPOTENCY_RECOVERY_REQUIRED',
+            job
+          );
+        }
+        if (disposition === 'completed') {
+          throw new OrchestratorError(
+            'idempotent operation already completed; mutation replay is blocked',
+            'IDEMPOTENCY_ALREADY_COMPLETED',
+            job
+          );
+        }
+        freshClaimPlan = plan;
       }
       job = await this.advance(job, 'approved', this.metadata(plan.planFingerprint, 'APPROVAL_BOUND'));
       job = await this.advance(job, 'dispatched', this.metadata(plan.planFingerprint, 'DISPATCHED_THROUGH_COLOSSUS'));
+      providerBoundaryEntered = true;
       const receipt = await this.colossus.dispatch({
         jobId: request.jobId,
         componentRef: request.componentRef,
@@ -161,11 +176,35 @@ export class SigmaOrchestrator {
       job = await this.advance(job, 'reconciled', this.metadata(plan.planFingerprint, 'RECONCILED'));
       if (this.store?.recordOutcome) await this.store.recordOutcome({ job, receipt, reconciliation });
       if (this.ledger?.complete) await this.ledger.complete(plan, { receipt, reconciliation, now: job.updatedAt });
+      freshClaimPlan = null;
       return Object.freeze({ job, plan, approval: { approvalId: approval.approvalId }, receipt, reconciliation });
     } catch (error) {
-      const failure = error instanceof OrchestratorError
+      let failure = error instanceof OrchestratorError
         ? error
         : new OrchestratorError(error.message, error.code || 'ORCHESTRATOR_FAILED', job);
+
+      if (freshClaimPlan && !providerBoundaryEntered && this.ledger?.release) {
+        try {
+          await this.ledger.release(freshClaimPlan);
+          freshClaimPlan = null;
+        } catch (releaseError) {
+          failure = new OrchestratorError(
+            `pre-dispatch failure could not release idempotency claim: ${releaseError.message}`,
+            'IDEMPOTENCY_RELEASE_FAILED',
+            job
+          );
+        }
+      }
+
+      if (providerBoundaryEntered && job && RECOVERY_STATES.has(job.state)) {
+        try {
+          job = await this.advance(job, 'recovery_required', this.metadata(job.planFingerprint || requestFingerprint, 'PROVIDER_OUTCOME_UNCERTAIN'));
+          failure.job = job;
+        } catch {
+          // Preserve the original provider-boundary failure if durable recovery-state persistence also fails.
+        }
+      }
+
       if (this.store?.recordFailure && job) {
         try { await this.store.recordFailure(job, failure); } catch { /* preserve the original failure */ }
       }
