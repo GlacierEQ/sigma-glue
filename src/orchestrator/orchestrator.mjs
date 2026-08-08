@@ -2,6 +2,7 @@ import { assertApprovalBinding } from '../approval/approval-binding.mjs';
 import { planFingerprint } from '../plan/fingerprint.mjs';
 import { makeCompensationPlan, makeMovePlan, normalizeMoveRequest } from '../protocol/request.mjs';
 import { transition } from '../state/state-machine.mjs';
+import { isProvablyPreProviderBoundary } from './provider-boundary-proof.mjs';
 
 const ACTOR = 'sigma-orchestrator';
 const RECOVERY_STATES = new Set(['dispatched', 'attempted', 'provider_confirmed', 'reconciling', 'reconciled']);
@@ -184,7 +185,7 @@ export class SigmaOrchestrator {
       freshClaimPlan = null;
       return Object.freeze({ job, plan, approval: { approvalId: approval.approvalId }, receipt, reconciliation });
     } catch (error) {
-      if (error?.providerBoundaryEntered === false) {
+      if (isProvablyPreProviderBoundary(error)) {
         providerBoundaryEntered = false;
       }
 
