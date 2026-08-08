@@ -3,6 +3,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { SqliteClaimLedger } from './sqlite-claim-ledger.mjs';
 
+const RECEIPT_STATUSES = new Set(['dispatched', 'blocked', 'failed']);
+
 export class PermitDispatchFenceError extends Error {
   constructor(message, code = 'DISPATCH_ATTEMPT_FENCE_FAILED', options = undefined) {
     super(message, options);
@@ -12,12 +14,13 @@ export class PermitDispatchFenceError extends Error {
 }
 
 /**
- * Extends the signed approval / permit ledger with a one-shot transport fence.
+ * Extends the signed approval / permit ledger with an exact one-shot transport
+ * fence. The fence records which immutable envelope crossed the provider
+ * boundary before transport is entered.
  *
- * Safety rule: once an exact persisted permit is reserved for transport, it is
- * never automatically reusable. A crash, timeout, malformed receipt, or lost
- * response leaves the attempt in `started` so recovery must determine provider
- * outcome instead of risking a duplicate external mutation.
+ * A crash, timeout, malformed receipt, or lost response leaves the attempt in
+ * `started`. That state is deliberately not replayable: recovery must determine
+ * provider outcome instead of risking a duplicate external mutation.
  */
 export class FencedSqliteClaimLedger extends SqliteClaimLedger {
   #fenceDb;
@@ -28,18 +31,30 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
     dispatchAttemptIdFactory = () => `dispatch_attempt_${randomUUID()}`,
     ...options
   } = {}) {
-    super(path, { timeoutMs, ...options });
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+      throw new PermitDispatchFenceError(
+        'timeoutMs must be a positive safe integer',
+        'DISPATCH_ATTEMPT_TIMEOUT_INVALID'
+      );
+    }
     if (typeof dispatchAttemptIdFactory !== 'function') {
-      super.close();
       throw new PermitDispatchFenceError(
         'dispatchAttemptIdFactory must be a function',
         'DISPATCH_ATTEMPT_ID_FACTORY_INVALID'
       );
     }
 
+    super(path, { timeoutMs, ...options });
     this.#attemptIdFactory = dispatchAttemptIdFactory;
+
     try {
       this.#fenceDb = new DatabaseSync(path, { timeout: timeoutMs });
+      if (typeof this.#fenceDb.isTransaction !== 'boolean') {
+        throw new PermitDispatchFenceError(
+          'runtime does not expose required SQLite transaction state',
+          'DISPATCH_ATTEMPT_RUNTIME_UNSUPPORTED'
+        );
+      }
       this.#fenceDb.exec(`
         PRAGMA foreign_keys = ON;
         PRAGMA journal_mode = WAL;
@@ -49,23 +64,45 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
         CREATE TABLE IF NOT EXISTS permit_dispatch_attempts (
           attempt_id TEXT PRIMARY KEY,
           permit_id TEXT NOT NULL UNIQUE,
-          idempotency_key TEXT NOT NULL UNIQUE,
-          permit_fingerprint TEXT NOT NULL UNIQUE,
-          state TEXT NOT NULL CHECK (state IN ('started', 'accepted')),
+          idempotency_key TEXT NOT NULL,
+          permit_fingerprint TEXT NOT NULL,
+          request_id TEXT NOT NULL,
+          envelope_fingerprint TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('started', 'accepted', 'rejected')),
           started_at TEXT NOT NULL,
-          accepted_at TEXT,
+          completed_at TEXT,
+          receipt_status TEXT CHECK (receipt_status IS NULL OR receipt_status IN ('dispatched', 'blocked', 'failed')),
           receipt_fingerprint TEXT,
+          provider_received_at TEXT,
+          reason_code TEXT,
           FOREIGN KEY (permit_id) REFERENCES dispatch_permits(permit_id),
           CHECK (
-            (state = 'started' AND accepted_at IS NULL AND receipt_fingerprint IS NULL)
+            (state = 'started'
+              AND completed_at IS NULL
+              AND receipt_status IS NULL
+              AND receipt_fingerprint IS NULL
+              AND provider_received_at IS NULL
+              AND reason_code IS NULL)
             OR
-            (state = 'accepted' AND accepted_at IS NOT NULL AND receipt_fingerprint IS NOT NULL)
+            (state = 'accepted'
+              AND completed_at IS NOT NULL
+              AND receipt_status = 'dispatched'
+              AND receipt_fingerprint IS NOT NULL
+              AND provider_received_at IS NOT NULL)
+            OR
+            (state = 'rejected'
+              AND completed_at IS NOT NULL
+              AND receipt_status IN ('blocked', 'failed')
+              AND receipt_fingerprint IS NOT NULL
+              AND provider_received_at IS NOT NULL
+              AND reason_code IS NOT NULL)
           )
         ) STRICT;
       `);
     } catch (error) {
       try { this.#fenceDb?.close(); } catch { /* preserve initialization failure */ }
-      super.close();
+      try { super.close(); } catch { /* preserve initialization failure */ }
+      if (error instanceof PermitDispatchFenceError) throw error;
       throw new PermitDispatchFenceError(
         'dispatch-attempt store initialization failed',
         'DISPATCH_ATTEMPT_STORE_INIT_FAILED',
@@ -75,12 +112,41 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
   }
 
   close() {
-    this.#fenceDb.close();
-    return super.close();
+    let fenceError = null;
+    let baseError = null;
+    try {
+      this.#fenceDb.close();
+    } catch (error) {
+      fenceError = error;
+    } finally {
+      try {
+        super.close();
+      } catch (error) {
+        baseError = error;
+      }
+    }
+    if (fenceError || baseError) {
+      throw new PermitDispatchFenceError(
+        'dispatch-attempt store close failed',
+        'DISPATCH_ATTEMPT_STORE_CLOSE_FAILED',
+        { cause: fenceError ?? baseError }
+      );
+    }
   }
 
-  beginDispatchAttempt({ permit, now = new Date() }) {
+  beginDispatchAttempt({
+    permit,
+    requestId,
+    envelopeFingerprint,
+    now = new Date()
+  }) {
     const identity = permitIdentity(permit);
+    requestId = requireString(requestId, 'requestId', 'DISPATCH_REQUEST_ID_INVALID');
+    envelopeFingerprint = requireString(
+      envelopeFingerprint,
+      'envelopeFingerprint',
+      'DISPATCH_ENVELOPE_FINGERPRINT_INVALID'
+    );
     const startedAt = canonicalDate(now, 'DISPATCH_ATTEMPT_TIME_INVALID');
     const nowMs = Date.parse(startedAt);
 
@@ -126,19 +192,7 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
         );
       }
 
-      const prior = this.#fenceDb.prepare(`
-        SELECT
-          attempt_id AS attemptId,
-          permit_id AS permitId,
-          idempotency_key AS idempotencyKey,
-          permit_fingerprint AS permitFingerprint,
-          state,
-          started_at AS startedAt,
-          accepted_at AS acceptedAt,
-          receipt_fingerprint AS receiptFingerprint
-        FROM permit_dispatch_attempts
-        WHERE permit_id = ?
-      `).get(identity.permitId);
+      const prior = this.#attemptByPermitId(identity.permitId);
       if (prior) {
         throw new PermitDispatchFenceError(
           `dispatch permit already has a ${prior.state} transport attempt`,
@@ -150,33 +204,72 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
       this.#fenceDb.prepare(`
         INSERT INTO permit_dispatch_attempts (
           attempt_id, permit_id, idempotency_key, permit_fingerprint,
-          state, started_at
-        ) VALUES (?, ?, ?, ?, 'started', ?)
+          request_id, envelope_fingerprint, state, started_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'started', ?)
       `).run(
         attemptId,
         identity.permitId,
         identity.idempotencyKey,
         identity.permitFingerprint,
+        requestId,
+        envelopeFingerprint,
         startedAt
       );
 
       return Object.freeze({
         attemptId,
         ...identity,
+        requestId,
+        envelopeFingerprint,
         state: 'started',
         startedAt,
-        acceptedAt: null,
+        completedAt: null,
+        receiptStatus: null,
         receiptFingerprint: null,
+        providerReceivedAt: null,
+        reasonCode: null,
         replayed: false
       });
     });
   }
 
-  acceptDispatchAttempt({ attemptId, permit, receiptFingerprint, now = new Date() }) {
-    requireString(attemptId, 'attemptId', 'DISPATCH_ATTEMPT_ID_INVALID');
-    requireString(receiptFingerprint, 'receiptFingerprint', 'DISPATCH_RECEIPT_FINGERPRINT_INVALID');
+  completeDispatchAttempt({
+    attemptId,
+    permit,
+    requestId,
+    envelopeFingerprint,
+    receiptStatus,
+    receiptFingerprint,
+    providerReceivedAt,
+    reasonCode = null,
+    now = new Date()
+  }) {
+    attemptId = requireString(attemptId, 'attemptId', 'DISPATCH_ATTEMPT_ID_INVALID');
+    requestId = requireString(requestId, 'requestId', 'DISPATCH_REQUEST_ID_INVALID');
+    envelopeFingerprint = requireString(
+      envelopeFingerprint,
+      'envelopeFingerprint',
+      'DISPATCH_ENVELOPE_FINGERPRINT_INVALID'
+    );
+    receiptFingerprint = requireString(
+      receiptFingerprint,
+      'receiptFingerprint',
+      'DISPATCH_RECEIPT_FINGERPRINT_INVALID'
+    );
+    if (!RECEIPT_STATUSES.has(receiptStatus)) {
+      throw new PermitDispatchFenceError(
+        'receiptStatus is invalid',
+        'DISPATCH_RECEIPT_STATUS_INVALID'
+      );
+    }
+    const providerAt = canonicalTimestamp(
+      providerReceivedAt,
+      'DISPATCH_PROVIDER_TIMESTAMP_INVALID'
+    );
+    const normalizedReason = normalizeReasonCode(receiptStatus, reasonCode);
     const identity = permitIdentity(permit);
-    const acceptedAt = canonicalDate(now, 'DISPATCH_ATTEMPT_TIME_INVALID');
+    const completedAt = canonicalDate(now, 'DISPATCH_ATTEMPT_TIME_INVALID');
+    const nextState = receiptStatus === 'dispatched' ? 'accepted' : 'rejected';
 
     return this.#transaction(() => {
       const existing = this.#attemptById(attemptId);
@@ -186,45 +279,55 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
           'DISPATCH_ATTEMPT_NOT_FOUND'
         );
       }
-      for (const field of ['permitId', 'idempotencyKey', 'permitFingerprint']) {
-        if (existing[field] !== identity[field]) {
-          throw new PermitDispatchFenceError(
-            `dispatch attempt does not match ${field}`,
-            'DISPATCH_ATTEMPT_SUBJECT_MISMATCH'
-          );
-        }
-      }
+      assertAttemptBinding(existing, {
+        ...identity,
+        requestId,
+        envelopeFingerprint
+      });
 
-      if (existing.state === 'accepted') {
-        if (existing.receiptFingerprint !== receiptFingerprint) {
+      if (existing.state !== 'started') {
+        const identical = existing.state === nextState &&
+          existing.receiptStatus === receiptStatus &&
+          existing.receiptFingerprint === receiptFingerprint &&
+          existing.providerReceivedAt === providerAt &&
+          existing.reasonCode === normalizedReason;
+        if (!identical) {
           throw new PermitDispatchFenceError(
-            'accepted dispatch attempt was replayed with different receipt evidence',
-            'DISPATCH_ATTEMPT_RECEIPT_MISMATCH'
+            'completed dispatch attempt was replayed with different outcome evidence',
+            'DISPATCH_ATTEMPT_OUTCOME_MISMATCH'
           );
         }
         return Object.freeze({ ...existing, replayed: true });
       }
-      if (existing.state !== 'started') {
-        throw new PermitDispatchFenceError(
-          'dispatch attempt is in an unsupported state',
-          'DISPATCH_ATTEMPT_STATE_INVALID'
-        );
-      }
 
       const startedMs = Date.parse(existing.startedAt);
-      const acceptedMs = Date.parse(acceptedAt);
-      if (!Number.isFinite(startedMs) || !Number.isFinite(acceptedMs) || acceptedMs < startedMs) {
+      const completedMs = Date.parse(completedAt);
+      if (!Number.isFinite(startedMs) || !Number.isFinite(completedMs) || completedMs < startedMs) {
         throw new PermitDispatchFenceError(
-          'accepted receipt evidence predates the durable dispatch attempt',
+          'local completion time predates the durable dispatch attempt',
           'DISPATCH_ATTEMPT_TIME_INVALID'
         );
       }
 
       const updated = this.#fenceDb.prepare(`
         UPDATE permit_dispatch_attempts
-        SET state = 'accepted', accepted_at = ?, receipt_fingerprint = ?
+        SET
+          state = ?,
+          completed_at = ?,
+          receipt_status = ?,
+          receipt_fingerprint = ?,
+          provider_received_at = ?,
+          reason_code = ?
         WHERE attempt_id = ? AND state = 'started'
-      `).run(acceptedAt, receiptFingerprint, attemptId);
+      `).run(
+        nextState,
+        completedAt,
+        receiptStatus,
+        receiptFingerprint,
+        providerAt,
+        normalizedReason,
+        attemptId
+      );
       if (updated.changes !== 1) {
         throw new PermitDispatchFenceError(
           'dispatch attempt changed concurrently',
@@ -236,37 +339,17 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
   }
 
   getDispatchAttemptByPermitId(permitId) {
-    requireString(permitId, 'permitId', 'DISPATCH_PERMIT_ID_INVALID');
-    const row = this.#fenceDb.prepare(`
-      SELECT
-        attempt_id AS attemptId,
-        permit_id AS permitId,
-        idempotency_key AS idempotencyKey,
-        permit_fingerprint AS permitFingerprint,
-        state,
-        started_at AS startedAt,
-        accepted_at AS acceptedAt,
-        receipt_fingerprint AS receiptFingerprint
-      FROM permit_dispatch_attempts
-      WHERE permit_id = ?
-    `).get(permitId);
+    permitId = requireString(permitId, 'permitId', 'DISPATCH_PERMIT_ID_INVALID');
+    const row = this.#attemptByPermitId(permitId);
     return row ? Object.freeze({ ...row }) : null;
   }
 
+  #attemptByPermitId(permitId) {
+    return this.#fenceDb.prepare(`${ATTEMPT_SELECT}\nWHERE permit_id = ?`).get(permitId) ?? null;
+  }
+
   #attemptById(attemptId) {
-    return this.#fenceDb.prepare(`
-      SELECT
-        attempt_id AS attemptId,
-        permit_id AS permitId,
-        idempotency_key AS idempotencyKey,
-        permit_fingerprint AS permitFingerprint,
-        state,
-        started_at AS startedAt,
-        accepted_at AS acceptedAt,
-        receipt_fingerprint AS receiptFingerprint
-      FROM permit_dispatch_attempts
-      WHERE attempt_id = ?
-    `).get(attemptId) ?? null;
+    return this.#fenceDb.prepare(`${ATTEMPT_SELECT}\nWHERE attempt_id = ?`).get(attemptId) ?? null;
   }
 
   #newAttemptId() {
@@ -313,6 +396,41 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
   }
 }
 
+const ATTEMPT_SELECT = `
+  SELECT
+    attempt_id AS attemptId,
+    permit_id AS permitId,
+    idempotency_key AS idempotencyKey,
+    permit_fingerprint AS permitFingerprint,
+    request_id AS requestId,
+    envelope_fingerprint AS envelopeFingerprint,
+    state,
+    started_at AS startedAt,
+    completed_at AS completedAt,
+    receipt_status AS receiptStatus,
+    receipt_fingerprint AS receiptFingerprint,
+    provider_received_at AS providerReceivedAt,
+    reason_code AS reasonCode
+  FROM permit_dispatch_attempts
+`;
+
+function assertAttemptBinding(existing, expected) {
+  for (const field of [
+    'permitId',
+    'idempotencyKey',
+    'permitFingerprint',
+    'requestId',
+    'envelopeFingerprint'
+  ]) {
+    if (existing[field] !== expected[field]) {
+      throw new PermitDispatchFenceError(
+        `dispatch attempt does not match ${field}`,
+        'DISPATCH_ATTEMPT_SUBJECT_MISMATCH'
+      );
+    }
+  }
+}
+
 function permitIdentity(permit) {
   if (!permit || typeof permit !== 'object' || Array.isArray(permit)) {
     throw new PermitDispatchFenceError('dispatch permit is required', 'DISPATCH_PERMIT_INVALID');
@@ -324,11 +442,30 @@ function permitIdentity(permit) {
   });
 }
 
+function normalizeReasonCode(receiptStatus, reasonCode) {
+  if (receiptStatus === 'blocked' || receiptStatus === 'failed') {
+    return requireString(reasonCode, 'reasonCode', 'DISPATCH_RECEIPT_REASON_INVALID');
+  }
+  if (reasonCode === null || reasonCode === undefined) return null;
+  return requireString(reasonCode, 'reasonCode', 'DISPATCH_RECEIPT_REASON_INVALID');
+}
+
 function requireString(value, field, code) {
   if (typeof value !== 'string' || value.trim() === '') {
     throw new PermitDispatchFenceError(`${field} must be a non-empty string`, code);
   }
   return value;
+}
+
+function canonicalTimestamp(value, code) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new PermitDispatchFenceError('timestamp is missing', code);
+  }
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    throw new PermitDispatchFenceError('timestamp is invalid', code);
+  }
+  return new Date(parsed).toISOString();
 }
 
 function canonicalDate(value, code) {

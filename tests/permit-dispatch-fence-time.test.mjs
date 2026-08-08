@@ -42,7 +42,7 @@ function subject(value) {
   };
 }
 
-test('accepted receipt evidence cannot predate the durable transport attempt', async () => {
+test('local completion evidence cannot predate the durable transport attempt', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'sigma-permit-time-'));
   const ledger = new FencedSqliteClaimLedger(join(dir, 'claims.sqlite'), {
     approvalVerifier: createTestTrustStore()
@@ -51,13 +51,22 @@ test('accepted receipt evidence cannot predate the durable transport attempt', a
     const signed = approval();
     ledger.registerApproval({ approval: signed, now: START });
     const permit = ledger.claimDispatchPermit({ expected: subject(signed), now: START });
-    const attempt = ledger.beginDispatchAttempt({ permit, now: START });
+    const attempt = ledger.beginDispatchAttempt({
+      permit,
+      requestId: 'request-time-1',
+      envelopeFingerprint: 'sha256:envelope-time-1',
+      now: START
+    });
 
     assert.throws(
-      () => ledger.acceptDispatchAttempt({
+      () => ledger.completeDispatchAttempt({
         attemptId: attempt.attemptId,
         permit,
+        requestId: 'request-time-1',
+        envelopeFingerprint: 'sha256:envelope-time-1',
+        receiptStatus: 'dispatched',
         receiptFingerprint: 'sha256:receipt-time-1',
+        providerReceivedAt: '2035-01-01T00:00:00.000Z',
         now: new Date('2026-08-01T22:00:04.999Z')
       }),
       (error) => error instanceof PermitDispatchFenceError &&
@@ -65,8 +74,35 @@ test('accepted receipt evidence cannot predate the durable transport attempt', a
     );
 
     assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId).state, 'started');
+
+    const completed = ledger.completeDispatchAttempt({
+      attemptId: attempt.attemptId,
+      permit,
+      requestId: 'request-time-1',
+      envelopeFingerprint: 'sha256:envelope-time-1',
+      receiptStatus: 'dispatched',
+      receiptFingerprint: 'sha256:receipt-time-1',
+      providerReceivedAt: '2035-01-01T00:00:00.000Z',
+      now: new Date('2026-08-01T22:00:06.000Z')
+    });
+
+    assert.equal(completed.state, 'accepted');
+    assert.equal(completed.startedAt, START.toISOString());
+    assert.equal(completed.completedAt, '2026-08-01T22:00:06.000Z');
+    assert.equal(completed.providerReceivedAt, '2035-01-01T00:00:00.000Z');
   } finally {
     ledger.close();
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('fenced ledger rejects zero timeout before opening SQLite state', () => {
+  assert.throws(
+    () => new FencedSqliteClaimLedger('unused.sqlite', {
+      timeoutMs: 0,
+      approvalVerifier: createTestTrustStore()
+    }),
+    (error) => error instanceof PermitDispatchFenceError &&
+      error.code === 'DISPATCH_ATTEMPT_TIMEOUT_INVALID'
+  );
 });

@@ -1,8 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 
 import {
   ColossusDispatchAdapter,
@@ -14,6 +16,7 @@ import {
   signTestApproval
 } from './helpers/gatekeeper-fixture.mjs';
 
+const execFileAsync = promisify(execFile);
 const NOW = new Date('2026-08-01T22:00:00.000Z');
 const REGISTRY = Object.freeze({
   'commander@ref-1': Object.freeze({
@@ -101,7 +104,7 @@ async function withSharedLedger(run) {
     first.registerApproval({ approval, now: NOW });
     const permit = first.claimDispatchPermit({ expected: executionSubject(approval), now: NOW });
     second = new FencedSqliteClaimLedger(dbPath, options);
-    return await run({ first, second, permit });
+    return await run({ first, second, permit, dbPath });
   } finally {
     second?.close();
     first.close();
@@ -114,7 +117,8 @@ function adapter(permitStore, transport, timeoutMs = 10_000) {
     registry: REGISTRY,
     permitStore,
     transport,
-    timeoutMs
+    timeoutMs,
+    clock: () => new Date('2026-08-01T22:00:02.000Z')
   });
 }
 
@@ -141,7 +145,7 @@ test('sequential replay of one persisted permit never re-enters transport', asyn
   });
 });
 
-test('concurrent adapters on independent ledger connections cross transport once', async () => {
+test('a second connection sees the committed started attempt before replay reaches transport', async () => {
   await withSharedLedger(async ({ first, second, permit }) => {
     let calls = 0;
     let releaseFirst;
@@ -178,12 +182,43 @@ test('concurrent adapters on independent ledger connections cross transport once
   });
 });
 
-test('timeout leaves a started attempt and blocks automatic replay', async () => {
+test('independent processes atomically converge on one permit reservation', async () => {
+  await withSharedLedger(async ({ first, permit, dbPath }) => {
+    const worker = join(import.meta.dirname, 'helpers', 'dispatch-attempt-worker.mjs');
+    const inputs = Array.from({ length: 8 }, () => execFileAsync(
+      process.execPath,
+      [
+        worker,
+        dbPath,
+        JSON.stringify(permit),
+        'request-process-1',
+        'sha256:envelope-process-1',
+        NOW.toISOString()
+      ],
+      { env: { ...process.env, NODE_NO_WARNINGS: '1' } }
+    ));
+    const results = (await Promise.all(inputs)).map(({ stdout }) => JSON.parse(stdout.trim()));
+
+    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.equal(
+      results.filter((result) => result.code === 'DISPATCH_PERMIT_ALREADY_ATTEMPTED').length,
+      7
+    );
+    const attempt = first.getDispatchAttemptByPermitId(permit.permitId);
+    assert.equal(attempt.state, 'started');
+    assert.equal(attempt.requestId, 'request-process-1');
+    assert.equal(attempt.envelopeFingerprint, 'sha256:envelope-process-1');
+  });
+});
+
+test('timeout leaves exact started-attempt evidence and blocks automatic replay', async () => {
   await withSharedLedger(async ({ first, second, permit }) => {
     let calls = 0;
+    let captured;
     const transport = {
       supportsAbort: true,
-      dispatch: async (_envelope, { signal }) => {
+      dispatch: async (envelope, { signal }) => {
+        captured = envelope;
         calls += 1;
         await new Promise((resolve, reject) => {
           const timer = setTimeout(resolve, 200);
@@ -202,7 +237,10 @@ test('timeout leaves a started attempt and blocks automatic replay', async () =>
       firstAdapter.dispatch({ permit, request: dispatchRequest(), now: NOW }),
       (error) => error instanceof ColossusDispatchError && error.code === 'COLOSSUS_TIMEOUT'
     );
-    assert.equal(first.getDispatchAttemptByPermitId(permit.permitId).state, 'started');
+    const attempt = first.getDispatchAttemptByPermitId(permit.permitId);
+    assert.equal(attempt.state, 'started');
+    assert.equal(attempt.requestId, captured.requestId);
+    assert.equal(attempt.envelopeFingerprint, captured.envelopeFingerprint);
 
     await assert.rejects(
       retryAdapter.dispatch({ permit, request: dispatchRequest(), now: NOW }),

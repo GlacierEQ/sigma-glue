@@ -11,6 +11,15 @@ import { normalizeRegistry, resolveRoute } from './registry.mjs';
 import { normalizeRequest, validateScopedHandles } from './request.mjs';
 import { validateReceipt } from './receipt.mjs';
 
+const PUBLIC_FENCE_CODES = new Set([
+  'DISPATCH_PERMIT_ALREADY_ATTEMPTED',
+  'DISPATCH_ATTEMPT_LOCK_UNAVAILABLE',
+  'DISPATCH_PERMIT_NOT_ACTIVE',
+  'DISPATCH_PERMIT_EXPIRED',
+  'DISPATCH_PERMIT_NOT_PERSISTED',
+  'DISPATCH_PERMIT_STORE_MISMATCH'
+]);
+
 export { ColossusDispatchError } from './common.mjs';
 
 export class ColossusDispatchAdapter {
@@ -20,6 +29,7 @@ export class ColossusDispatchAdapter {
   #timeoutMs;
   #protocolVersion;
   #schemaVersion;
+  #clock;
 
   constructor({
     registry,
@@ -27,7 +37,8 @@ export class ColossusDispatchAdapter {
     permitStore,
     timeoutMs = 10_000,
     protocolVersion = 'sigma-federation/v1',
-    schemaVersion = 'colossus-dispatch/v1'
+    schemaVersion = 'colossus-dispatch/v1',
+    clock = () => new Date()
   } = {}) {
     if (!transport || typeof transport.dispatch !== 'function' || transport.supportsAbort !== true) {
       throw new ColossusDispatchError(
@@ -38,7 +49,7 @@ export class ColossusDispatchAdapter {
     if (!permitStore ||
         typeof permitStore.getPermitByIdempotencyKey !== 'function' ||
         typeof permitStore.beginDispatchAttempt !== 'function' ||
-        typeof permitStore.acceptDispatchAttempt !== 'function') {
+        typeof permitStore.completeDispatchAttempt !== 'function') {
       throw new ColossusDispatchError(
         'one-shot dispatch permit store is required',
         'DISPATCH_PERMIT_STORE_INVALID'
@@ -47,6 +58,9 @@ export class ColossusDispatchAdapter {
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
       throw new ColossusDispatchError('timeoutMs must be a positive safe integer', 'COLOSSUS_TIMEOUT_INVALID');
     }
+    if (typeof clock !== 'function') {
+      throw new ColossusDispatchError('clock must be a function', 'DISPATCH_CLOCK_INVALID');
+    }
 
     this.#registry = normalizeRegistry(registry);
     this.#transport = transport;
@@ -54,11 +68,13 @@ export class ColossusDispatchAdapter {
     this.#timeoutMs = timeoutMs;
     this.#protocolVersion = requireString(protocolVersion, 'protocolVersion', 'PROTOCOL_VERSION_INVALID');
     this.#schemaVersion = requireString(schemaVersion, 'schemaVersion', 'SCHEMA_VERSION_INVALID');
+    this.#clock = clock;
   }
 
-  async dispatch({ permit, request, now = new Date() }) {
-    const nowIso = canonicalDate(now, 'DISPATCH_TIME_INVALID');
-    const normalizedPermit = validatePermit(permit, now);
+  async dispatch({ permit, request, now = undefined } = {}) {
+    const dispatchNow = now ?? this.#clock();
+    const nowIso = canonicalDate(dispatchNow, 'DISPATCH_TIME_INVALID');
+    const normalizedPermit = validatePermit(permit, dispatchNow);
     assertPersistedPermit(this.#permitStore, normalizedPermit);
     const normalizedRequest = normalizeRequest(request);
     if (normalizedRequest.protocolVersion !== this.#protocolVersion) {
@@ -68,7 +84,7 @@ export class ColossusDispatchAdapter {
       throw new ColossusDispatchError('schema version is incompatible', 'SCHEMA_VERSION_INCOMPATIBLE');
     }
     assertExactBinding(normalizedPermit, normalizedRequest);
-    validateScopedHandles(normalizedRequest.scopedHandles, now, normalizedPermit.expiresAt);
+    validateScopedHandles(normalizedRequest.scopedHandles, dispatchNow, normalizedPermit.expiresAt);
 
     const route = resolveRoute(this.#registry, normalizedRequest);
     rejectSecretShapedContent(normalizedRequest.payload, '$.payload');
@@ -103,7 +119,9 @@ export class ColossusDispatchAdapter {
     try {
       attempt = this.#permitStore.beginDispatchAttempt({
         permit: normalizedPermit,
-        now
+        requestId: normalizedRequest.requestId,
+        envelopeFingerprint,
+        now: dispatchNow
       });
     } catch (error) {
       throw dispatchFenceError(error, 'DISPATCH_ATTEMPT_FENCE_FAILED');
@@ -118,18 +136,27 @@ export class ColossusDispatchAdapter {
     });
 
     try {
-      this.#permitStore.acceptDispatchAttempt({
+      this.#permitStore.completeDispatchAttempt({
         attemptId: attempt.attemptId,
         permit: normalizedPermit,
+        requestId: normalizedRequest.requestId,
+        envelopeFingerprint,
+        receiptStatus: validatedReceipt.status,
         receiptFingerprint: planFingerprint(validatedReceipt),
-        now: new Date(validatedReceipt.receivedAt)
+        providerReceivedAt: validatedReceipt.receivedAt,
+        reasonCode: validatedReceipt.reasonCode,
+        now: observedDate(this.#clock(), 'DISPATCH_COMPLETION_TIME_INVALID')
       });
     } catch (error) {
-      throw new ColossusDispatchError(
-        'Colossus accepted the dispatch but durable one-shot attempt persistence failed',
-        'DISPATCH_ATTEMPT_ACCEPTANCE_FAILED',
+      const failure = new ColossusDispatchError(
+        'Colossus returned a validated dispatch outcome but durable one-shot attempt persistence failed',
+        'DISPATCH_ATTEMPT_COMPLETION_FAILED',
         { cause: error }
       );
+      failure.receipt = validatedReceipt;
+      failure.attemptId = attempt.attemptId;
+      failure.envelopeFingerprint = envelopeFingerprint;
+      throw failure;
     }
 
     return validatedReceipt;
@@ -137,13 +164,19 @@ export class ColossusDispatchAdapter {
 }
 
 function dispatchFenceError(error, fallbackCode) {
-  const code = typeof error?.code === 'string' && error.code.length > 0
-    ? error.code
-    : fallbackCode;
-  const message = typeof error?.message === 'string' && error.message.length > 0
-    ? error.message
-    : 'dispatch-attempt fence failed';
-  return new ColossusDispatchError(message, code, { cause: error });
+  const code = PUBLIC_FENCE_CODES.has(error?.code) ? error.code : fallbackCode;
+  return new ColossusDispatchError(
+    'dispatch-attempt fence rejected the request',
+    code,
+    { cause: error }
+  );
+}
+
+function observedDate(value, code) {
+  if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
+    throw new ColossusDispatchError('local observation clock returned an invalid date', code);
+  }
+  return value;
 }
 
 async function dispatchOnce(transport, envelope, timeoutMs) {
