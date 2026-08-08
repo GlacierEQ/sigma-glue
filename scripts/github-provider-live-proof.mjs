@@ -107,15 +107,19 @@ try {
   if (first.receipt.status !== 'dispatched') {
     throw new Error(`confirmed provider write was not dispatched: ${first.receipt.status}`);
   }
-  const confirmedObservation = await observer.inspectOutcome({ uncertainty: { target } });
+  const confirmedObservation = await observer.inspectTarget({ target });
   if (!confirmedObservation.exists || confirmedObservation.contentFingerprint !== payload1.desired.fingerprint) {
     throw new Error('confirmed provider write did not read back the desired fingerprint');
+  }
+  if (confirmedObservation.versionSemantics !== 'content_addressed') {
+    throw new Error('GitHub provider did not declare content-addressed version semantics');
   }
 
   const baseline2 = {
     exists: confirmedObservation.exists,
     contentFingerprint: confirmedObservation.contentFingerprint,
-    version: confirmedObservation.version
+    version: confirmedObservation.version,
+    versionSemantics: confirmedObservation.versionSemantics
   };
   const desired2 = JSON.stringify({
     schema: 'sigma.provider-canary.v1',
@@ -170,15 +174,21 @@ try {
   });
   const { recovery, receipt: recoveryReceipt } = await durableRecovery.recover({ uncertainty });
   if (recovery.state !== 'confirmed_applied' || recovery.retryDisposition !== 'do_not_retry_reconcile') {
-    throw new Error(`ambiguous provider recovery did not prove applied: ${recovery.state}`);
+    throw new Error(`ambiguous provider recovery did not prove desired state applied: ${recovery.state}`);
+  }
+  if (recovery.uncertainty.baseline.versionSemantics !== 'content_addressed' ||
+      recovery.observation.versionSemantics !== 'content_addressed') {
+    throw new Error('provider recovery did not preserve GitHub content-addressed proof semantics');
   }
 
   recoveryLedger.close();
   recoveryLedger = new SqliteProviderRecoveryLedger(recoveryLedgerPath);
   const restartReceipt = recoveryLedger.getByRequestId(durableAttempt.requestId);
   if (!restartReceipt || restartReceipt.recordFingerprint !== recoveryReceipt.recordFingerprint ||
-      restartReceipt.state !== 'confirmed_applied') {
-    throw new Error('provider recovery evidence did not survive close/reopen');
+      restartReceipt.state !== 'confirmed_applied' ||
+      restartReceipt.baselineVersionSemantics !== 'content_addressed' ||
+      restartReceipt.observationVersionSemantics !== 'content_addressed') {
+    throw new Error('provider recovery evidence or proof semantics did not survive close/reopen');
   }
 
   const putsBeforeReplay = broker.putCalls;
@@ -192,13 +202,14 @@ try {
   if (broker.putCalls !== putsBeforeReplay) throw new Error('replay reached the provider despite the one-shot fence');
 
   console.log(JSON.stringify({
-    schema: 'sigma.github-provider-live-proof.v2',
+    schema: 'sigma.github-provider-live-proof.v3',
     provider: 'github-contents/v1',
     target,
     candidateSha,
     confirmedWrite: {
       status: first.receipt.status,
       observedVersion: confirmedObservation.version,
+      versionSemantics: confirmedObservation.versionSemantics,
       desiredFingerprint: payload1.desired.fingerprint
     },
     ambiguousWrite: {
@@ -207,6 +218,7 @@ try {
       retryDisposition: recovery.retryDisposition,
       desiredFingerprint: payload2.desired.fingerprint,
       observedVersion: recovery.observation.version,
+      versionSemantics: recovery.observation.versionSemantics,
       recoveryRecordFingerprint: recoveryReceipt.recordFingerprint,
       recoveryRestartReadable: true,
       replayBlocked
@@ -223,14 +235,20 @@ try {
 }
 
 async function inspectBaseline(providerObserver, providerTarget) {
-  const observed = await providerObserver.inspectOutcome({ uncertainty: { target: providerTarget } });
+  const observed = await providerObserver.inspectTarget({ target: providerTarget });
   return observed.exists
     ? {
         exists: true,
         contentFingerprint: observed.contentFingerprint,
-        version: observed.version
+        version: observed.version,
+        versionSemantics: observed.versionSemantics
       }
-    : { exists: false, contentFingerprint: null, version: null };
+    : {
+        exists: false,
+        contentFingerprint: null,
+        version: null,
+        versionSemantics: 'unknown'
+      };
 }
 
 async function executeSignedDispatch({ ledger: claimLedger, adapter, privateKey: signingKey, issuer: signingIssuer, keyId: signingKeyId, payload, suffix }) {
