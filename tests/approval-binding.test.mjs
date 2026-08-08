@@ -15,18 +15,26 @@ const expected = {
   planFingerprint: planFingerprint(plan),
   componentRef: 'commander@ref-1',
   method: 'execute',
-  idempotencyKey: 'idem-job-1'
+  idempotencyKey: 'idem-job-1',
+  policyVersion: 'policy-v1'
 };
 const approval = {
   ...expected,
   status: 'approved',
+  issuedAt: '2026-08-01T11:59:00Z',
   expiresAt: '2026-08-01T13:00:00Z'
 };
 
- test('binds approval to the exact plan and execution subject', () => {
+test('binds approval to the exact plan and execution subject', () => {
   assert.deepEqual(
     assertApprovalBinding({ approval, expected, now: new Date('2026-08-01T12:00:00Z') }),
-    { approvalId: 'approval-1', bound: true }
+    {
+      approvalId: 'approval-1',
+      planFingerprint: expected.planFingerprint,
+      policyVersion: 'policy-v1',
+      expiresAt: '2026-08-01T13:00:00.000Z',
+      bound: true
+    }
   );
 });
 

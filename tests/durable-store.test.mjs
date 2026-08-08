@@ -33,10 +33,10 @@ test('persists restart-readable lifecycle records without raw plan data', async 
       store,
       ledger,
       colossus,
-      gatekeeper: { requestApproval: async ({ jobId, componentRef, method, plan }) => ({
+      gatekeeper: { requestApproval: async ({ jobId, componentRef, method, policyVersion, plan }) => ({
         approvalId: 'approval-durable-1', status: 'approved', jobId, componentRef, method,
         idempotencyKey: plan.idempotencyKey, planFingerprint: plan.planFingerprint,
-        expiresAt: '2099-01-01T00:00:00Z'
+        policyVersion, issuedAt: '2026-08-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z'
       }) }
     });
 

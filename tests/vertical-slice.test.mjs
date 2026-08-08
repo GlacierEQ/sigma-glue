@@ -32,8 +32,8 @@ beforeEach(async () => {
   approvals = [];
   registry = new ComponentRegistry();
   registry.register(component);
-  const gatekeeper = { requestApproval: async ({ jobId, componentRef, method, plan }) => {
-    const approval = { approvalId: `approval-${approvals.length + 1}`, status: 'approved', jobId, componentRef, method, idempotencyKey: plan.idempotencyKey, planFingerprint: plan.planFingerprint, expiresAt: '2099-01-01T00:00:00Z' };
+  const gatekeeper = { requestApproval: async ({ jobId, componentRef, method, policyVersion, plan }) => {
+    const approval = { approvalId: `approval-${approvals.length + 1}`, status: 'approved', jobId, componentRef, method, idempotencyKey: plan.idempotencyKey, planFingerprint: plan.planFingerprint, policyVersion, issuedAt: '2026-08-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' };
     approvals.push(approval);
     return approval;
   }};
@@ -68,7 +68,7 @@ test('reuses the exact idempotency subject on a repeated execution', async () =>
 });
 
 test('rejects an approval bound to a changed plan', async () => {
-  orchestrator.gatekeeper = { requestApproval: async ({ plan, jobId, componentRef, method }) => ({ approvalId: 'bad-approval', status: 'approved', jobId, componentRef, method, idempotencyKey: plan.idempotencyKey, planFingerprint: planFingerprint({ ...plan, items: [] }), expiresAt: '2099-01-01T00:00:00Z' }) };
+  orchestrator.gatekeeper = { requestApproval: async ({ plan, jobId, componentRef, method, policyVersion }) => ({ approvalId: 'bad-approval', status: 'approved', jobId, componentRef, method, idempotencyKey: plan.idempotencyKey, planFingerprint: planFingerprint({ ...plan, items: [] }), policyVersion, issuedAt: '2026-08-01T00:00:00Z', expiresAt: '2099-01-01T00:00:00Z' }) };
   await assert.rejects(() => orchestrator.move(request()), (error) => error instanceof OrchestratorError && error.code === 'APPROVAL_SUBJECT_MISMATCH');
 });
 
