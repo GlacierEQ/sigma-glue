@@ -14,6 +14,11 @@ import {
   createTestTrustStore,
   signTestApproval
 } from './helpers/gatekeeper-fixture.mjs';
+import {
+  createScopedHandleTrustStore,
+  signTestScopedHandle,
+  TEST_SCOPED_HANDLE_AUTHORITY
+} from './helpers/scoped-handle-fixture.mjs';
 
 const NOW = new Date('2026-08-01T22:00:00.000Z');
 const REGISTRY = Object.freeze({
@@ -26,7 +31,11 @@ const REGISTRY = Object.freeze({
         maxHandles: 1,
         handles: Object.freeze([
           Object.freeze({ type: 'filesystem-root', scope: 'move-within-root' })
-        ])
+        ]),
+        issuers: Object.freeze([Object.freeze({
+          issuer: TEST_SCOPED_HANDLE_AUTHORITY.issuer,
+          keyId: TEST_SCOPED_HANDLE_AUTHORITY.keyId
+        })])
       })
     })
   })
@@ -64,6 +73,7 @@ function dispatchRequest(overrides = {}) {
     type: 'filesystem-root',
     id: 'root-fence-1',
     scope: 'move-within-root',
+    issuedAt: '2026-08-01T21:59:00.000Z',
     expiresAt: '2026-08-01T22:00:30.000Z'
   }];
   const base = {
@@ -85,10 +95,13 @@ function dispatchRequest(overrides = {}) {
   const bindingFingerprint = authorityBindingFingerprint(base);
   return {
     ...base,
-    scopedHandles: requestedHandles.map((handle) => ({
-      ...handle,
-      bindingFingerprint: handle.bindingFingerprint ?? bindingFingerprint
-    }))
+    scopedHandles: requestedHandles.map((handle) => handle.signature
+      ? handle
+      : signTestScopedHandle({
+        issuedAt: '2026-08-01T21:59:00.000Z',
+        ...handle,
+        bindingFingerprint: handle.bindingFingerprint ?? bindingFingerprint
+      }))
   };
 }
 
@@ -132,6 +145,7 @@ function adapter(permitStore, transport, timeoutMs = 10_000) {
   return new ColossusDispatchAdapter({
     registry: REGISTRY,
     permitStore,
+    scopedHandleTrustStore: createScopedHandleTrustStore(),
     transport,
     timeoutMs
   });
@@ -154,7 +168,6 @@ test('sequential replay of one persisted permit never re-enters transport', asyn
       (error) => error instanceof ColossusDispatchError &&
         error.code === 'DISPATCH_PERMIT_ALREADY_ATTEMPTED'
     );
-
     assert.equal(calls, 1);
     assert.equal(first.getDispatchAttemptByPermitId(permit.permitId).state, 'accepted');
   });
@@ -191,7 +204,6 @@ test('concurrent adapters on independent ledger connections cross transport once
     );
     releaseFirst();
     await firstDispatch;
-
     assert.equal(calls, 1);
     assert.equal(second.getDispatchAttemptByPermitId(permit.permitId).state, 'accepted');
   });
@@ -222,7 +234,6 @@ test('timeout leaves a started attempt and blocks automatic replay', async () =>
       (error) => error instanceof ColossusDispatchError && error.code === 'COLOSSUS_TIMEOUT'
     );
     assert.equal(first.getDispatchAttemptByPermitId(permit.permitId).state, 'started');
-
     await assert.rejects(
       retryAdapter.dispatch({ permit, request: dispatchRequest(), now: NOW }),
       (error) => error instanceof ColossusDispatchError &&
@@ -232,7 +243,7 @@ test('timeout leaves a started attempt and blocks automatic replay', async () =>
   });
 });
 
-test('pre-transport validation failure does not consume the permit attempt', async () => {
+test('pre-transport validation failure does not consume permit authority', async () => {
   await withSharedLedger(async ({ first, permit }) => {
     let calls = 0;
     const colossus = adapter(first, {
@@ -252,7 +263,6 @@ test('pre-transport validation failure does not consume the permit attempt', asy
       (error) => error instanceof ColossusDispatchError && error.code === 'CAPABILITY_SCOPE_MISMATCH'
     );
     assert.equal(first.getDispatchAttemptByPermitId(permit.permitId), null);
-
     await colossus.dispatch({ permit, request: dispatchRequest(), now: NOW });
     assert.equal(calls, 1);
     assert.equal(first.getDispatchAttemptByPermitId(permit.permitId).state, 'accepted');
