@@ -32,6 +32,30 @@ function assertEvidenceBinding(evidence, expectedStatus, plan, failureCode) {
   }
 }
 
+function assertDispatchClaim(claim, job) {
+  if (!claim?.reused) return;
+  const state = claim.record?.state;
+  if (state === 'completed') {
+    throw new OrchestratorError(
+      'idempotent operation already completed; mutation replay is blocked',
+      'IDEMPOTENCY_ALREADY_COMPLETED',
+      job
+    );
+  }
+  if (state === 'claimed') {
+    throw new OrchestratorError(
+      'idempotent operation is already claimed; reconcile the prior attempt before retrying',
+      'IDEMPOTENCY_RECOVERY_REQUIRED',
+      job
+    );
+  }
+  throw new OrchestratorError(
+    `idempotency ledger returned unsupported state: ${String(state)}`,
+    'IDEMPOTENCY_LEDGER_STATE_INVALID',
+    job
+  );
+}
+
 export class OrchestratorError extends Error {
   constructor(message, code = 'ORCHESTRATOR_FAILED', job = null) {
     super(message);
@@ -99,7 +123,10 @@ export class SigmaOrchestrator {
         now: this.now()
       });
       assertPlanIntegrity(plan);
-      if (this.ledger?.claim) await this.ledger.claim(plan, this.now().toISOString());
+      if (this.ledger?.claim) {
+        const claim = await this.ledger.claim(plan, this.now().toISOString());
+        assertDispatchClaim(claim, job);
+      }
       job = await this.advance(job, 'approved', this.metadata(plan.planFingerprint, 'APPROVAL_BOUND'));
       job = await this.advance(job, 'dispatched', this.metadata(plan.planFingerprint, 'DISPATCHED_THROUGH_COLOSSUS'));
       const receipt = await this.colossus.dispatch({
