@@ -42,7 +42,9 @@ const credentialHandle = 'credh_githubactions';
 const broker = liveBroker(token);
 const observer = new GitHubContentsProviderObserver({
   credentialBroker: broker,
-  credentialHandle
+  credentialHandle,
+  consistencyAttempts: 20,
+  consistencyDelayMs: 250
 });
 const root = await mkdtemp(join(tmpdir(), 'sigma-live-provider-'));
 const recoveryLedgerPath = join(root, 'provider-recovery.sqlite');
@@ -107,9 +109,12 @@ try {
   if (first.receipt.status !== 'dispatched') {
     throw new Error(`confirmed provider write was not dispatched: ${first.receipt.status}`);
   }
-  const confirmedObservation = await observer.inspectTarget({ target });
+  const confirmedObservation = await observer.inspectTarget({
+    target,
+    expectedFingerprint: payload1.desired.fingerprint
+  });
   if (!confirmedObservation.exists || confirmedObservation.contentFingerprint !== payload1.desired.fingerprint) {
-    throw new Error('confirmed provider write did not read back the desired fingerprint');
+    throw new Error('confirmed provider write did not converge to the desired fingerprint');
   }
   if (confirmedObservation.versionSemantics !== 'content_addressed') {
     throw new Error('GitHub provider did not declare content-addressed version semantics');
@@ -202,7 +207,7 @@ try {
   if (broker.putCalls !== putsBeforeReplay) throw new Error('replay reached the provider despite the one-shot fence');
 
   console.log(JSON.stringify({
-    schema: 'sigma.github-provider-live-proof.v3',
+    schema: 'sigma.github-provider-live-proof.v4',
     provider: 'github-contents/v1',
     target,
     candidateSha,
@@ -210,7 +215,8 @@ try {
       status: first.receipt.status,
       observedVersion: confirmedObservation.version,
       versionSemantics: confirmedObservation.versionSemantics,
-      desiredFingerprint: payload1.desired.fingerprint
+      desiredFingerprint: payload1.desired.fingerprint,
+      boundedReadConvergence: true
     },
     ambiguousWrite: {
       localAttemptState: durableAttempt.state,
@@ -221,6 +227,7 @@ try {
       versionSemantics: recovery.observation.versionSemantics,
       recoveryRecordFingerprint: recoveryReceipt.recordFingerprint,
       recoveryRestartReadable: true,
+      boundedReadConvergence: true,
       replayBlocked
     },
     providerCalls: {
