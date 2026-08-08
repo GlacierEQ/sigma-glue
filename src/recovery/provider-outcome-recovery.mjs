@@ -122,7 +122,6 @@ async function observeWithTimeout({ observer, uncertainty, observedAt, timeoutMs
         'PROVIDER_OBSERVATION_TIMEOUT'
       ));
     }, timeoutMs);
-    timer.unref?.();
   });
   try {
     return await Promise.race([
