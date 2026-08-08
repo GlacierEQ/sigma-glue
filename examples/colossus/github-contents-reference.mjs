@@ -4,4 +4,4 @@ export {
   GitHubContentsProviderObserver,
   GitHubContentsProviderUncertainError,
   githubContentFingerprint
-} from './github-contents-provider.mjs';
+} from './github-contents-provider-v2.mjs';
