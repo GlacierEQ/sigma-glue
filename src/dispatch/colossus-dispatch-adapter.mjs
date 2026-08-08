@@ -72,9 +72,8 @@ export class ColossusDispatchAdapter {
   }
 
   async dispatch({ permit, request, now = undefined } = {}) {
-    const localStartedAt = observedDate(this.#clock(), 'DISPATCH_CLOCK_INVALID');
     const dispatchNow = now === undefined
-      ? localStartedAt
+      ? observedDate(this.#clock(), 'DISPATCH_CLOCK_INVALID')
       : observedDate(now, 'DISPATCH_TIME_INVALID');
     const nowIso = canonicalDate(dispatchNow, 'DISPATCH_TIME_INVALID');
     const normalizedPermit = validatePermit(permit, dispatchNow);
@@ -124,7 +123,7 @@ export class ColossusDispatchAdapter {
         permit: normalizedPermit,
         requestId: normalizedRequest.requestId,
         envelopeFingerprint,
-        now: localStartedAt
+        now: dispatchNow
       });
     } catch (error) {
       throw dispatchFenceError(error, 'DISPATCH_ATTEMPT_FENCE_FAILED');
@@ -139,6 +138,10 @@ export class ColossusDispatchAdapter {
     });
 
     try {
+      const observedCompletion = observedDate(this.#clock(), 'DISPATCH_COMPLETION_TIME_INVALID');
+      const completionNow = observedCompletion.getTime() < dispatchNow.getTime()
+        ? dispatchNow
+        : observedCompletion;
       this.#permitStore.completeDispatchAttempt({
         attemptId: attempt.attemptId,
         permit: normalizedPermit,
@@ -148,7 +151,7 @@ export class ColossusDispatchAdapter {
         receiptFingerprint: planFingerprint(validatedReceipt),
         providerReceivedAt: validatedReceipt.receivedAt,
         reasonCode: validatedReceipt.reasonCode,
-        now: observedDate(this.#clock(), 'DISPATCH_COMPLETION_TIME_INVALID')
+        now: completionNow
       });
     } catch (error) {
       const failure = new ColossusDispatchError(

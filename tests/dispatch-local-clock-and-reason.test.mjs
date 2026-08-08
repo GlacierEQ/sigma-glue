@@ -109,16 +109,12 @@ async function withPermit(run) {
   }
 }
 
-test('caller logical now cannot push durable attempt start ahead of the adapter clock', async () => {
+test('caller dispatch observation owns durable start and completion clamps against clock skew', async () => {
   await withPermit(async ({ ledger, permit }) => {
-    const ticks = [
-      new Date('2026-08-01T22:00:03.000Z'),
-      new Date('2026-08-01T22:00:04.000Z')
-    ];
     const adapter = new ColossusDispatchAdapter({
       registry: REGISTRY,
       permitStore: ledger,
-      clock: () => ticks.shift(),
+      clock: () => new Date('2026-08-01T22:00:04.000Z'),
       transport: {
         supportsAbort: true,
         dispatch: async (envelope) => receiptFor(envelope)
@@ -134,8 +130,8 @@ test('caller logical now cannot push durable attempt start ahead of the adapter 
 
     assert.equal(receipt.status, 'dispatched');
     assert.equal(attempt.state, 'accepted');
-    assert.equal(attempt.startedAt, '2026-08-01T22:00:03.000Z');
-    assert.equal(attempt.completedAt, '2026-08-01T22:00:04.000Z');
+    assert.equal(attempt.startedAt, '2026-08-01T22:00:10.000Z');
+    assert.equal(attempt.completedAt, '2026-08-01T22:00:10.000Z');
     assert.equal(attempt.providerReceivedAt, '2026-08-01T22:00:11.000Z');
   });
 });
