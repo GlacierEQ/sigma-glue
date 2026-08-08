@@ -1,0 +1,42 @@
+name: github-provider-live-proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - 'innovation/github-provider-recovery-*'
+    paths:
+      - 'src/recovery/**'
+      - 'examples/colossus/github-contents-*.mjs'
+      - 'scripts/github-provider-live-proof.mjs'
+      - 'tests/github-contents-reference.test.mjs'
+      - 'tests/github-contents-hardening.test.mjs'
+      - 'tests/github-contents-convergence.test.mjs'
+      - 'tests/provider-outcome-recovery.test.mjs'
+      - 'tests/provider-recovery-ledger.test.mjs'
+      - 'docs/PROVIDER_RECOVERY.md'
+      - 'docs/IMPLEMENTATION_STATUS.md'
+      - 'README.md'
+      - '.github/workflows/github-provider-live-proof.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sigma-github-provider-canary
+  cancel-in-progress: false
+
+jobs:
+  live-provider-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run live GitHub Contents recovery proof
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/github-provider-live-proof.mjs
