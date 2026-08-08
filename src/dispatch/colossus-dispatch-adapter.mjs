@@ -72,7 +72,10 @@ export class ColossusDispatchAdapter {
   }
 
   async dispatch({ permit, request, now = undefined } = {}) {
-    const dispatchNow = now ?? this.#clock();
+    const localStartedAt = observedDate(this.#clock(), 'DISPATCH_CLOCK_INVALID');
+    const dispatchNow = now === undefined
+      ? localStartedAt
+      : observedDate(now, 'DISPATCH_TIME_INVALID');
     const nowIso = canonicalDate(dispatchNow, 'DISPATCH_TIME_INVALID');
     const normalizedPermit = validatePermit(permit, dispatchNow);
     assertPersistedPermit(this.#permitStore, normalizedPermit);
@@ -121,7 +124,7 @@ export class ColossusDispatchAdapter {
         permit: normalizedPermit,
         requestId: normalizedRequest.requestId,
         envelopeFingerprint,
-        now: dispatchNow
+        now: localStartedAt
       });
     } catch (error) {
       throw dispatchFenceError(error, 'DISPATCH_ATTEMPT_FENCE_FAILED');

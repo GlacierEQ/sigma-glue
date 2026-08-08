@@ -62,7 +62,8 @@ const CREATE_ATTEMPT_TABLE_SQL = `
         AND completed_at IS NOT NULL
         AND receipt_status = 'dispatched'
         AND receipt_fingerprint IS NOT NULL
-        AND provider_received_at IS NOT NULL)
+        AND provider_received_at IS NOT NULL
+        AND reason_code IS NULL)
       OR
       (state = 'rejected'
         AND request_id IS NOT NULL
@@ -599,7 +600,10 @@ function normalizeReasonCode(receiptStatus, reasonCode) {
     return requireString(reasonCode, 'reasonCode', 'DISPATCH_RECEIPT_REASON_INVALID');
   }
   if (reasonCode === null || reasonCode === undefined) return null;
-  return requireString(reasonCode, 'reasonCode', 'DISPATCH_RECEIPT_REASON_INVALID');
+  throw new PermitDispatchFenceError(
+    'dispatched receipt cannot include reasonCode',
+    'DISPATCH_RECEIPT_REASON_INVALID'
+  );
 }
 
 function requireString(value, field, code) {

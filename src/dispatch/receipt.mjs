@@ -60,6 +60,12 @@ export function validateReceipt(receipt, { request, permit, route, envelopeFinge
       (typeof receipt.reasonCode !== 'string' || receipt.reasonCode.trim() === '')) {
     throw new ColossusDispatchError('blocked or failed receipt requires reasonCode', 'COLOSSUS_RECEIPT_INVALID');
   }
+  if (receipt.status === 'dispatched' && receipt.reasonCode !== undefined && receipt.reasonCode !== null) {
+    throw new ColossusDispatchError(
+      'dispatched receipt cannot include reasonCode',
+      'COLOSSUS_RECEIPT_INVALID'
+    );
+  }
   const diagnostics = receipt.redactedDiagnostics ?? [];
   if (!Array.isArray(diagnostics) || diagnostics.some((item) => typeof item !== 'string')) {
     throw new ColossusDispatchError('receipt diagnostics must be redacted strings', 'COLOSSUS_RECEIPT_INVALID');
