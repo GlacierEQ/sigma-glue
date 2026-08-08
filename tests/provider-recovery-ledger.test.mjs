@@ -32,7 +32,8 @@ function uncertainty(overrides = {}) {
     baseline: {
       exists: true,
       contentFingerprint: BASELINE,
-      version: 'blob-baseline-1'
+      version: 'blob-baseline-1',
+      versionSemantics: 'content_addressed'
     },
     ...overrides
   };
@@ -69,6 +70,7 @@ test('durable coordinator records confirmed applied evidence and survives restar
         exists: true,
         contentFingerprint: DESIRED,
         version: 'blob-desired-1',
+        versionSemantics: 'content_addressed',
         providerRequestId: 'REQ-DURABLE-1'
       }),
       ledger,
@@ -80,14 +82,51 @@ test('durable coordinator records confirmed applied evidence and survives restar
     assert.equal(receipt.state, 'confirmed_applied');
     assert.equal(receipt.replayed, false);
     assert.match(receipt.recordFingerprint, /^sha256:[0-9a-f]{64}$/);
+    assert.equal(receipt.baselineVersionSemantics, 'content_addressed');
+    assert.equal(receipt.observationVersionSemantics, 'content_addressed');
 
     const reopened = reopen();
     const stored = reopened.getByRequestId('request-durable-recovery-1');
     assert.equal(stored.state, 'confirmed_applied');
     assert.equal(stored.retryDisposition, 'do_not_retry_reconcile');
     assert.equal(stored.observationVersion, 'blob-desired-1');
+    assert.equal(stored.baselineVersionSemantics, 'content_addressed');
+    assert.equal(stored.observationVersionSemantics, 'content_addressed');
     assert.equal(stored.providerRequestId, 'REQ-DURABLE-1');
     assert.equal(stored.recordFingerprint, receipt.recordFingerprint);
+  });
+});
+
+test('monotonic non-application proof is preserved as durable evidence', async () => {
+  await withLedger(async ({ ledger, reopen }) => {
+    const monotonicBaseline = {
+      exists: true,
+      contentFingerprint: BASELINE,
+      version: 'revision-17',
+      versionSemantics: 'monotonic_revision'
+    };
+    const recovery = await classifier({
+      target: TARGET,
+      exists: true,
+      contentFingerprint: BASELINE,
+      version: 'revision-17',
+      versionSemantics: 'monotonic_revision',
+      providerRequestId: 'REQ-MONOTONIC-1'
+    }).recover({
+      uncertainty: uncertainty({
+        provider: 'monotonic-provider/v1',
+        baseline: monotonicBaseline
+      })
+    });
+
+    const receipt = ledger.record(recovery);
+    assert.equal(receipt.state, 'confirmed_not_applied');
+    assert.equal(receipt.retryDisposition, 'requires_new_authorization');
+    assert.equal(receipt.baselineVersionSemantics, 'monotonic_revision');
+    assert.equal(receipt.observationVersionSemantics, 'monotonic_revision');
+
+    const reopened = reopen();
+    assert.equal(reopened.getByRequestId('request-durable-recovery-1').state, 'confirmed_not_applied');
   });
 });
 
@@ -97,7 +136,8 @@ test('identical recovery evidence is idempotent', async () => {
       target: TARGET,
       exists: true,
       contentFingerprint: DESIRED,
-      version: 'blob-desired-1'
+      version: 'blob-desired-1',
+      versionSemantics: 'content_addressed'
     }).recover({ uncertainty: uncertainty() });
 
     const first = ledger.record(recovery, { now: new Date('2026-08-08T20:30:01.000Z') });
@@ -115,7 +155,8 @@ test('changed evidence for the same request fails closed', async () => {
       target: TARGET,
       exists: true,
       contentFingerprint: DESIRED,
-      version: 'blob-desired-1'
+      version: 'blob-desired-1',
+      versionSemantics: 'content_addressed'
     }).recover({ uncertainty: uncertainty() });
     ledger.record(applied);
 
@@ -123,7 +164,8 @@ test('changed evidence for the same request fails closed', async () => {
       target: TARGET,
       exists: true,
       contentFingerprint: 'sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd',
-      version: 'blob-third-party-1'
+      version: 'blob-third-party-1',
+      versionSemantics: 'content_addressed'
     }).recover({ uncertainty: uncertainty() });
 
     assert.throws(
@@ -144,7 +186,8 @@ test('two independent ledger connections converge on one exact recovery record',
       target: TARGET,
       exists: true,
       contentFingerprint: DESIRED,
-      version: 'blob-desired-1'
+      version: 'blob-desired-1',
+      versionSemantics: 'content_addressed'
     }).recover({ uncertainty: uncertainty() });
     const one = first.record(recovery);
     const two = second.record(recovery);
@@ -164,14 +207,21 @@ test('ledger stores fingerprints and identities rather than desired content byte
       target: TARGET,
       exists: false,
       contentFingerprint: null,
-      version: null
+      version: null,
+      versionSemantics: 'unknown'
     }).recover({
       uncertainty: uncertainty({
-        baseline: { exists: false, contentFingerprint: null, version: null }
+        baseline: {
+          exists: false,
+          contentFingerprint: null,
+          version: null,
+          versionSemantics: 'unknown'
+        }
       })
     });
     const receipt = ledger.record(recovery);
-    assert.equal(receipt.state, 'confirmed_not_applied');
+    assert.equal(receipt.state, 'still_unknown');
+    assert.equal(receipt.reasonCode, 'ABSENCE_HISTORY_UNPROVEN');
     assert.equal(Object.hasOwn(receipt, 'desiredContent'), false);
     assert.equal(Object.hasOwn(receipt, 'path'), false);
     assert.match(receipt.targetFingerprint, /^sha256:[0-9a-f]{64}$/);
