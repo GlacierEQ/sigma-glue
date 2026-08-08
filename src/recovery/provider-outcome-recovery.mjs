@@ -5,6 +5,11 @@ const RECOVERY_STATES = new Set([
   'confirmed_not_applied',
   'still_unknown'
 ]);
+const VERSION_SEMANTICS = new Set([
+  'monotonic_revision',
+  'content_addressed',
+  'unknown'
+]);
 
 export class ProviderOutcomeRecoveryError extends Error {
   constructor(message, code = 'PROVIDER_RECOVERY_FAILED', options = undefined) {
@@ -22,8 +27,8 @@ export class ProviderOutcomeRecoveryError extends Error {
  * baseline fingerprints captured by the approved mutation intent.
  *
  * Safe retry rule:
- * - confirmed_applied     -> reconcile; never replay
- * - confirmed_not_applied -> a new authorization is required before retry
+ * - confirmed_applied     -> desired state is observed; reconcile, never replay
+ * - confirmed_not_applied -> only monotonic provider revision evidence may prove this
  * - still_unknown         -> freeze; never replay automatically
  */
 export class ProviderOutcomeRecoveryCoordinator {
@@ -84,11 +89,7 @@ export class ProviderOutcomeRecoveryCoordinator {
 
     const exactObservation = normalizeObservation(observation, normalized, observedAt);
     const state = classifyOutcome(normalized, exactObservation);
-    const reasonCode = state === 'confirmed_applied'
-      ? 'DESIRED_FINGERPRINT_OBSERVED'
-      : state === 'confirmed_not_applied'
-        ? 'BASELINE_FINGERPRINT_OBSERVED'
-        : 'PROVIDER_STATE_DIVERGED';
+    const reasonCode = classifyReason(normalized, exactObservation, state);
     const retryDisposition = state === 'confirmed_applied'
       ? 'do_not_retry_reconcile'
       : state === 'confirmed_not_applied'
@@ -141,15 +142,31 @@ function classifyOutcome(uncertainty, observation) {
   if (observation.exists && observation.contentFingerprint === uncertainty.desiredFingerprint) {
     return 'confirmed_applied';
   }
-  if (!uncertainty.baseline.exists && !observation.exists) {
-    return 'confirmed_not_applied';
+
+  const baseline = uncertainty.baseline;
+  const monotonicProof = baseline.exists && observation.exists &&
+    baseline.versionSemantics === 'monotonic_revision' &&
+    observation.versionSemantics === 'monotonic_revision' &&
+    observation.contentFingerprint === baseline.contentFingerprint &&
+    observation.version === baseline.version;
+
+  return monotonicProof ? 'confirmed_not_applied' : 'still_unknown';
+}
+
+function classifyReason(uncertainty, observation, state) {
+  if (state === 'confirmed_applied') return 'DESIRED_FINGERPRINT_OBSERVED';
+  if (state === 'confirmed_not_applied') return 'BASELINE_MONOTONIC_REVISION_UNCHANGED';
+
+  const baseline = uncertainty.baseline;
+  if (!baseline.exists && !observation.exists) {
+    return 'ABSENCE_HISTORY_UNPROVEN';
   }
-  if (uncertainty.baseline.exists && observation.exists &&
-      observation.contentFingerprint === uncertainty.baseline.contentFingerprint &&
-      observation.version === uncertainty.baseline.version) {
-    return 'confirmed_not_applied';
+  if (baseline.exists && observation.exists &&
+      observation.contentFingerprint === baseline.contentFingerprint &&
+      observation.version === baseline.version) {
+    return 'BASELINE_RESTORATION_AMBIGUOUS';
   }
-  return 'still_unknown';
+  return 'PROVIDER_STATE_DIVERGED';
 }
 
 function normalizeUncertainty(value) {
@@ -184,12 +201,18 @@ function normalizeBaseline(value) {
         'PROVIDER_BASELINE_INVALID'
       );
     }
-    return Object.freeze({ exists: false, contentFingerprint: null, version: null });
+    return Object.freeze({
+      exists: false,
+      contentFingerprint: null,
+      version: null,
+      versionSemantics: 'unknown'
+    });
   }
   return Object.freeze({
     exists: true,
     contentFingerprint: requiredFingerprint(value.contentFingerprint, 'baseline.contentFingerprint'),
-    version: requiredString(value.version, 'baseline.version')
+    version: requiredString(value.version, 'baseline.version'),
+    versionSemantics: versionSemantics(value.versionSemantics)
   });
 }
 
@@ -219,6 +242,7 @@ function normalizeObservation(value, uncertainty, observedAt) {
       exists: false,
       contentFingerprint: null,
       version: null,
+      versionSemantics: 'unknown',
       providerRequestId: optionalString(value.providerRequestId),
       observedAt: observedAt.toISOString()
     });
@@ -228,6 +252,7 @@ function normalizeObservation(value, uncertainty, observedAt) {
     exists: true,
     contentFingerprint: requiredFingerprint(value.contentFingerprint, 'observation.contentFingerprint'),
     version: requiredString(value.version, 'observation.version'),
+    versionSemantics: versionSemantics(value.versionSemantics),
     providerRequestId: optionalString(value.providerRequestId),
     observedAt: observedAt.toISOString()
   });
@@ -257,6 +282,7 @@ function normalizeStoredObservation(value) {
       exists: false,
       contentFingerprint: null,
       version: null,
+      versionSemantics: 'unknown',
       providerRequestId: optionalString(value.providerRequestId),
       observedAt: canonicalTimestamp(value.observedAt)
     });
@@ -266,6 +292,7 @@ function normalizeStoredObservation(value) {
     exists: true,
     contentFingerprint: requiredFingerprint(value.contentFingerprint, 'observation.contentFingerprint'),
     version: requiredString(value.version, 'observation.version'),
+    versionSemantics: versionSemantics(value.versionSemantics),
     providerRequestId: optionalString(value.providerRequestId),
     observedAt: canonicalTimestamp(value.observedAt)
   });
@@ -316,6 +343,17 @@ function exactTarget(value) {
     branch: requiredString(value.branch, 'target.branch'),
     path
   });
+}
+
+function versionSemantics(value) {
+  if (value == null) return 'unknown';
+  if (!VERSION_SEMANTICS.has(value)) {
+    throw new ProviderOutcomeRecoveryError(
+      'provider version semantics are invalid',
+      'PROVIDER_VERSION_SEMANTICS_INVALID'
+    );
+  }
+  return value;
 }
 
 function requiredString(value, field) {
