@@ -87,6 +87,13 @@ export class VerifiedExecutionLedger {
         'RECONCILIATION_METHOD_MISMATCH'
       );
     }
+    if (typeof result?.matchesExpected !== 'boolean' ||
+        result.matchesExpected !== (result.observedFingerprint === result.expectedFingerprint)) {
+      throw new ExecutionLedgerError(
+        'reconciliation match claim does not equal the fingerprint comparison',
+        'RECONCILIATION_MATCH_CLAIM_MISMATCH'
+      );
+    }
     assertEvidenceTime({
       evidenceAt: result?.observedAt,
       previousAt: operation.updatedAt,
