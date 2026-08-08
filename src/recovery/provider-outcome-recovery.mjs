@@ -29,8 +29,13 @@ export class ProviderOutcomeRecoveryError extends Error {
 export class ProviderOutcomeRecoveryCoordinator {
   #observer;
   #clock;
+  #observationTimeoutMs;
 
-  constructor({ observer, clock = () => new Date() } = {}) {
+  constructor({
+    observer,
+    clock = () => new Date(),
+    observationTimeoutMs = 10_000
+  } = {}) {
     if (!observer || typeof observer.inspectOutcome !== 'function') {
       throw new ProviderOutcomeRecoveryError(
         'provider outcome observer is required',
@@ -40,8 +45,15 @@ export class ProviderOutcomeRecoveryCoordinator {
     if (typeof clock !== 'function') {
       throw new ProviderOutcomeRecoveryError('clock must be a function', 'PROVIDER_RECOVERY_CLOCK_INVALID');
     }
+    if (!Number.isSafeInteger(observationTimeoutMs) || observationTimeoutMs <= 0) {
+      throw new ProviderOutcomeRecoveryError(
+        'observationTimeoutMs must be a positive safe integer',
+        'PROVIDER_OBSERVATION_TIMEOUT_INVALID'
+      );
+    }
     this.#observer = observer;
     this.#clock = clock;
+    this.#observationTimeoutMs = observationTimeoutMs;
   }
 
   async recover({ uncertainty } = {}) {
@@ -50,9 +62,11 @@ export class ProviderOutcomeRecoveryCoordinator {
 
     let observation;
     try {
-      observation = await this.#observer.inspectOutcome({
+      observation = await observeWithTimeout({
+        observer: this.#observer,
         uncertainty: normalized,
-        now: observedAt
+        observedAt,
+        timeoutMs: this.#observationTimeoutMs
       });
     } catch (error) {
       return freezeResult({
@@ -60,7 +74,9 @@ export class ProviderOutcomeRecoveryCoordinator {
         state: 'still_unknown',
         observation: null,
         observedAt,
-        reasonCode: 'PROVIDER_OBSERVATION_FAILED',
+        reasonCode: error?.code === 'PROVIDER_OBSERVATION_TIMEOUT'
+          ? 'PROVIDER_OBSERVATION_TIMEOUT'
+          : 'PROVIDER_OBSERVATION_FAILED',
         retryDisposition: 'forbidden_until_resolved',
         cause: error
       });
@@ -93,6 +109,33 @@ export class ProviderOutcomeRecoveryCoordinator {
 export function providerRecoveryFingerprint(value) {
   const normalized = normalizeRecoveryRecord(value);
   return planFingerprint(normalized);
+}
+
+async function observeWithTimeout({ observer, uncertainty, observedAt, timeoutMs }) {
+  const controller = new AbortController();
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new ProviderOutcomeRecoveryError(
+        'provider observation timed out',
+        'PROVIDER_OBSERVATION_TIMEOUT'
+      ));
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([
+      Promise.resolve().then(() => observer.inspectOutcome({
+        uncertainty,
+        now: observedAt,
+        signal: controller.signal
+      })),
+      timeout
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function classifyOutcome(uncertainty, observation) {
@@ -263,7 +306,9 @@ function exactTarget(value) {
     );
   }
   const path = requiredString(value.path, 'target.path');
-  if (path.startsWith('/') || path.includes('..') || /[\u0000-\u001F\u007F]/.test(path)) {
+  if (path.startsWith('/') ||
+      path.split('/').some((segment) => segment === '..' || segment === '') ||
+      /[\u0000-\u001F\u007F]/.test(path)) {
     throw new ProviderOutcomeRecoveryError('provider target path is unsafe', 'PROVIDER_TARGET_INVALID');
   }
   return Object.freeze({
