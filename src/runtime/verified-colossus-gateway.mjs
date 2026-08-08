@@ -5,6 +5,7 @@ export class VerifiedColossusGatewayError extends Error {
     super(message, options);
     this.name = 'VerifiedColossusGatewayError';
     this.code = code;
+    this.providerBoundaryEntered = options?.providerBoundaryEntered ?? null;
   }
 }
 
@@ -38,9 +39,10 @@ export class VerifiedColossusGateway {
   } = {}) {
     if (!permitLedger ||
         typeof permitLedger.registerApproval !== 'function' ||
-        typeof permitLedger.claimDispatchPermit !== 'function') {
+        typeof permitLedger.claimDispatchPermit !== 'function' ||
+        typeof permitLedger.getDispatchAttemptByPermitId !== 'function') {
       throw new VerifiedColossusGatewayError(
-        'signed permit ledger is required',
+        'signed one-shot permit ledger is required',
         'SIGNED_PERMIT_LEDGER_INVALID'
       );
     }
@@ -91,98 +93,102 @@ export class VerifiedColossusGateway {
 
   async dispatch(input) {
     const subject = orchestrationSubject(input);
-    const approvalNow = this.#date();
+    let permit = null;
 
-    this.#permitLedger.registerApproval({ approval: input.approval, now: approvalNow });
-    const permit = this.#permitLedger.claimDispatchPermit({
-      expected: {
-        approvalId: input.approval.approvalId,
-        jobId: subject.jobId,
-        planFingerprint: subject.planFingerprint,
-        componentRef: subject.componentRef,
-        method: subject.method,
+    try {
+      const approvalNow = this.#date();
+      this.#permitLedger.registerApproval({ approval: input.approval, now: approvalNow });
+      permit = this.#permitLedger.claimDispatchPermit({
+        expected: {
+          approvalId: input.approval.approvalId,
+          jobId: subject.jobId,
+          planFingerprint: subject.planFingerprint,
+          componentRef: subject.componentRef,
+          method: subject.method,
+          idempotencyKey: subject.idempotencyKey,
+          policyVersion: subject.policyVersion
+        },
+        now: approvalNow
+      });
+
+      const requestId = requestIdentity(subject);
+      const authority = normalizeDispatchAuthority(await this.#dispatchAuthority({
+        ...input,
+        permit,
+        requestId,
+        now: this.#date()
+      }));
+      const request = buildPlanBoundDispatchRequest({
+        input,
+        subject,
+        requestId,
+        authority
+      });
+
+      const dispatched = await this.#dispatchCoordinator.dispatchAndRecord({
+        permit,
+        request,
+        now: this.#date()
+      });
+      if (!dispatched?.operation || dispatched.operation.requestId !== requestId ||
+          dispatched.operation.idempotencyKey !== subject.idempotencyKey) {
+        throw new VerifiedColossusGatewayError(
+          'durable dispatch operation does not match the orchestration subject',
+          'DISPATCH_OPERATION_SUBJECT_MISMATCH'
+        );
+      }
+
+      const evidence = await this.#evidenceBridge.awaitProviderConfirmation({
+        ...input,
+        permit,
+        request,
+        dispatchReceipt: dispatched.receipt,
+        operation: dispatched.operation,
+        now: this.#date()
+      });
+      if (!evidence || typeof evidence !== 'object' || !evidence.attempt || !evidence.confirmation) {
+        throw new VerifiedColossusGatewayError(
+          'provider evidence bridge returned incomplete execution evidence',
+          'PROVIDER_EVIDENCE_INCOMPLETE'
+        );
+      }
+
+      let operation = this.#executionLedger.recordAttempt({
+        operationId: dispatched.operation.operationId,
+        attempt: evidence.attempt,
+        transitionKey: `attempt:${requestId}`,
+        now: this.#date()
+      });
+      operation = this.#executionLedger.recordProviderConfirmation({
+        operationId: operation.operationId,
+        confirmation: evidence.confirmation,
+        transitionKey: `provider-confirmation:${requestId}`,
+        now: this.#date()
+      });
+      const chain = this.#executionLedger.verifyEventChain(operation.operationId);
+      if (!chain?.valid || operation.state !== 'provider_confirmed') {
+        throw new VerifiedColossusGatewayError(
+          'provider confirmation did not produce a verified execution head',
+          'PROVIDER_CONFIRMATION_NOT_VERIFIED'
+        );
+      }
+
+      return Object.freeze({
+        status: 'provider_confirmed',
+        provider: subject.provider,
+        operation: subject.operation,
         idempotencyKey: subject.idempotencyKey,
-        policyVersion: subject.policyVersion
-      },
-      now: approvalNow
-    });
-
-    const requestId = requestIdentity(subject);
-    const authority = normalizeDispatchAuthority(await this.#dispatchAuthority({
-      ...input,
-      permit,
-      requestId,
-      now: this.#date()
-    }));
-    const request = buildPlanBoundDispatchRequest({
-      input,
-      subject,
-      permit,
-      requestId,
-      authority
-    });
-
-    const dispatched = await this.#dispatchCoordinator.dispatchAndRecord({
-      permit,
-      request,
-      now: this.#date()
-    });
-    if (!dispatched?.operation || dispatched.operation.requestId !== requestId ||
-        dispatched.operation.idempotencyKey !== subject.idempotencyKey) {
-      throw new VerifiedColossusGatewayError(
-        'durable dispatch operation does not match the orchestration subject',
-        'DISPATCH_OPERATION_SUBJECT_MISMATCH'
-      );
+        planFingerprint: subject.planFingerprint,
+        providerRequestId: evidence.confirmation.providerRequestId,
+        beforeFingerprint: evidence.confirmation.beforeFingerprint,
+        afterFingerprint: evidence.confirmation.afterFingerprint,
+        dispatchReceiptId: dispatched.receipt.receiptId,
+        executionOperationId: operation.operationId,
+        requestId
+      });
+    } catch (error) {
+      throw this.#classifyDispatchFailure(error, permit);
     }
-
-    const evidence = await this.#evidenceBridge.awaitProviderConfirmation({
-      ...input,
-      permit,
-      request,
-      dispatchReceipt: dispatched.receipt,
-      operation: dispatched.operation,
-      now: this.#date()
-    });
-    if (!evidence || typeof evidence !== 'object' || !evidence.attempt || !evidence.confirmation) {
-      throw new VerifiedColossusGatewayError(
-        'provider evidence bridge returned incomplete execution evidence',
-        'PROVIDER_EVIDENCE_INCOMPLETE'
-      );
-    }
-
-    let operation = this.#executionLedger.recordAttempt({
-      operationId: dispatched.operation.operationId,
-      attempt: evidence.attempt,
-      transitionKey: `attempt:${requestId}`,
-      now: this.#date()
-    });
-    operation = this.#executionLedger.recordProviderConfirmation({
-      operationId: operation.operationId,
-      confirmation: evidence.confirmation,
-      transitionKey: `provider-confirmation:${requestId}`,
-      now: this.#date()
-    });
-    const chain = this.#executionLedger.verifyEventChain(operation.operationId);
-    if (!chain?.valid || operation.state !== 'provider_confirmed') {
-      throw new VerifiedColossusGatewayError(
-        'provider confirmation did not produce a verified execution head',
-        'PROVIDER_CONFIRMATION_NOT_VERIFIED'
-      );
-    }
-
-    return Object.freeze({
-      status: 'provider_confirmed',
-      provider: subject.provider,
-      operation: subject.operation,
-      idempotencyKey: subject.idempotencyKey,
-      planFingerprint: subject.planFingerprint,
-      providerRequestId: evidence.confirmation.providerRequestId,
-      beforeFingerprint: evidence.confirmation.beforeFingerprint,
-      afterFingerprint: evidence.confirmation.afterFingerprint,
-      dispatchReceiptId: dispatched.receipt.receiptId,
-      executionOperationId: operation.operationId,
-      requestId
-    });
   }
 
   async reconcile(input) {
@@ -270,6 +276,25 @@ export class VerifiedColossusGateway {
     });
   }
 
+  #classifyDispatchFailure(error, permit) {
+    let providerBoundaryEntered = false;
+    if (permit) {
+      try {
+        providerBoundaryEntered = Boolean(
+          this.#permitLedger.getDispatchAttemptByPermitId(permit.permitId)
+        );
+      } catch {
+        // Failure to prove absence is treated as provider-boundary uncertainty.
+        providerBoundaryEntered = true;
+      }
+    }
+    return new VerifiedColossusGatewayError(
+      error?.message || 'verified Colossus dispatch failed',
+      error?.code || 'VERIFIED_COLOSSUS_DISPATCH_FAILED',
+      { cause: error, providerBoundaryEntered }
+    );
+  }
+
   #date() {
     const value = this.#now();
     if (!(value instanceof Date) || Number.isNaN(value.getTime())) {
@@ -281,7 +306,6 @@ export class VerifiedColossusGateway {
 
 function buildPlanBoundDispatchRequest({ input, subject, requestId, authority }) {
   const plan = input.plan;
-  const payload = canonicalPlanPayload(plan);
   return Object.freeze({
     protocolVersion: requiredString(plan.protocolVersion, 'plan.protocolVersion'),
     schemaVersion: 'colossus-dispatch/v1',
@@ -295,7 +319,7 @@ function buildPlanBoundDispatchRequest({ input, subject, requestId, authority })
     planFingerprint: subject.planFingerprint,
     policyVersion: subject.policyVersion,
     scopedHandles: authority.scopedHandles,
-    payload
+    payload: canonicalPlanPayload(plan)
   });
 }
 
