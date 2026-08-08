@@ -79,6 +79,18 @@ function expectedAfterFingerprint(plan) {
   });
 }
 
+function requestIdFor({ jobId, idempotencyKey, planHash }) {
+  return `request_${planFingerprint({
+    jobId,
+    componentRef: COMPONENT.ref,
+    method: 'execute',
+    operation: 'move',
+    idempotencyKey,
+    planFingerprint: planHash,
+    policyVersion: 'policy-v1'
+  }).slice('sha256:'.length)}`;
+}
+
 async function withSystem(run, { dishonestReconciliation = false } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'sigma-verified-gateway-'));
   await mkdir(join(root, 'inbox'), { recursive: true });
@@ -264,36 +276,27 @@ test('orchestrator mutation traverses signed permit dispatch and verified execut
 
 test('dishonest reconciliation match claim fails closed and preserves outer recovery state', async () => {
   await withSystem(async ({ orchestrator, executionLedger, outerLedger }) => {
+    const jobId = 'job-verified-gateway-dishonest';
+    const idempotencyKey = 'idem-verified-gateway-dishonest';
+
     await assert.rejects(
-      orchestrator.move(request({
-        jobId: 'job-verified-gateway-dishonest',
-        idempotencyKey: 'idem-verified-gateway-dishonest'
-      })),
+      orchestrator.move(request({ jobId, idempotencyKey })),
       (error) => error.code === 'RECONCILIATION_MATCH_CLAIM_MISMATCH' &&
         error.job?.state === 'recovery_required'
     );
 
-    const outer = await outerLedger.read('idem-verified-gateway-dishonest');
+    const outer = await outerLedger.read(idempotencyKey);
     assert.equal(outer.state, 'claimed');
 
-    const operations = ['job-verified-gateway-dishonest'];
-    assert.equal(operations.length, 1);
-    // The invalid reconciliation evidence is rejected before a false reconciled
-    // event can enter the durable execution chain.
-    const eventOperation = executionLedger.getEvents(
-      executionLedger.getOperationByRequestId(
-        [...Array(1)].map(() => null) &&
-        `request_${planFingerprint({
-          jobId: 'job-verified-gateway-dishonest',
-          componentRef: COMPONENT.ref,
-          method: 'execute',
-          operation: 'move',
-          idempotencyKey: 'idem-verified-gateway-dishonest',
-          planFingerprint: outer.planFingerprint,
-          policyVersion: 'policy-v1'
-        }).slice('sha256:'.length)}`
-      ).operationId
-    );
-    assert.equal(eventOperation.some((event) => event.toState === 'reconciled'), false);
+    const operation = executionLedger.getOperationByRequestId(requestIdFor({
+      jobId,
+      idempotencyKey,
+      planHash: outer.planFingerprint
+    }));
+    assert.ok(operation);
+    assert.equal(operation.state, 'reconciling');
+    const events = executionLedger.getEvents(operation.operationId);
+    assert.equal(events.some((event) => event.toState === 'reconciled'), false);
+    assert.equal(executionLedger.verifyEventChain(operation.operationId).valid, true);
   }, { dishonestReconciliation: true });
 });
