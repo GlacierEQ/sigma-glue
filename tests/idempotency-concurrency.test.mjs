@@ -64,9 +64,11 @@ test('concurrent orchestrators sharing one ledger cross the mutation boundary on
 
   const colossus = {
     dispatch: async ({ plan }) => {
-      dispatches += 1;
-      enteredDispatch();
-      await dispatchRelease;
+      const call = ++dispatches;
+      if (call === 1) {
+        enteredDispatch();
+        await dispatchRelease;
+      }
       return evidence('provider_confirmed', plan);
     },
     reconcile: async ({ plan }) => evidence('reconciled', plan)
@@ -94,7 +96,7 @@ test('concurrent orchestrators sharing one ledger cross the mutation boundary on
 
     await assert.rejects(
       () => second.move(request()),
-      (error) => error.code === 'IDEMPOTENCY_RECOVERY_REQUIRED'
+      (error) => error.code === 'IDEMPOTENCY_RECOVERY_REQUIRED' && error.job?.state === 'recovery_required'
     );
     assert.equal(dispatches, 1);
 
