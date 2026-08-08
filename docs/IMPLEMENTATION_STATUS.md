@@ -19,6 +19,8 @@
 - Timeout/invalid-receipt uncertainty remains durably `started` and is not automatically replayed.
 - Valid `dispatched` outcomes become `accepted`; explicit `blocked`/`failed` outcomes become `rejected`.
 - Local completion observation time is stored separately from provider-reported receipt time.
+- The known PR #10 attempt-table schema migrates transactionally; legacy rows become non-replayable `legacy_uncertain` evidence rather than being overclaimed as exact modern evidence.
+- Unknown attempt-table layouts fail closed instead of receiving a guessed migration.
 
 ### Colossus composition and execution evidence
 
@@ -50,8 +52,8 @@
 
 - The SQLite ledgers are **single-host durability mechanisms**, not distributed consensus or multi-host exactly-once services.
 - The permit fence proves **at-most-once transport entry for one persisted permit**; it does not prove provider-transactional exactly-once execution.
-- A durable `started` transport attempt is an uncertainty state requiring reconciliation because the provider may already have acted.
+- A durable `started` or migrated `legacy_uncertain` transport attempt is an uncertainty state requiring reconciliation because the provider may already have acted.
 - Provider-side duplicate suppression is not assumed unless a provider adapter proves it.
 - The repository verifies injected/fixture boundaries; it does not by itself prove live production Gatekeeper, Colossus, Commander, or provider deployments.
-- Encryption-at-rest, operational key management, backup/restore procedures, schema migration policy, multi-host coordination, and production deployment hardening remain separate gates.
+- Encryption-at-rest, operational key management, backup/restore procedures, a general future schema-versioning policy, multi-host coordination, and production deployment hardening remain separate gates.
 - `node:sqlite` is an evolving runtime surface; the repository declares the minimum Node runtime required by the transaction-state API it uses.

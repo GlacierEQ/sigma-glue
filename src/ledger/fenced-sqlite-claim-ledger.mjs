@@ -4,6 +4,89 @@ import { DatabaseSync } from 'node:sqlite';
 import { SqliteClaimLedger } from './sqlite-claim-ledger.mjs';
 
 const RECEIPT_STATUSES = new Set(['dispatched', 'blocked', 'failed']);
+const CURRENT_ATTEMPT_COLUMNS = Object.freeze([
+  'attempt_id',
+  'permit_id',
+  'idempotency_key',
+  'permit_fingerprint',
+  'request_id',
+  'envelope_fingerprint',
+  'state',
+  'started_at',
+  'completed_at',
+  'receipt_status',
+  'receipt_fingerprint',
+  'provider_received_at',
+  'reason_code'
+]);
+const LEGACY_V1_ATTEMPT_COLUMNS = Object.freeze([
+  'attempt_id',
+  'permit_id',
+  'idempotency_key',
+  'permit_fingerprint',
+  'state',
+  'started_at',
+  'accepted_at',
+  'receipt_fingerprint'
+]);
+
+const CREATE_ATTEMPT_TABLE_SQL = `
+  CREATE TABLE permit_dispatch_attempts (
+    attempt_id TEXT PRIMARY KEY,
+    permit_id TEXT NOT NULL UNIQUE,
+    idempotency_key TEXT NOT NULL,
+    permit_fingerprint TEXT NOT NULL,
+    request_id TEXT,
+    envelope_fingerprint TEXT,
+    state TEXT NOT NULL CHECK (state IN ('started', 'accepted', 'rejected', 'legacy_uncertain')),
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    receipt_status TEXT CHECK (receipt_status IS NULL OR receipt_status IN ('dispatched', 'blocked', 'failed')),
+    receipt_fingerprint TEXT,
+    provider_received_at TEXT,
+    reason_code TEXT,
+    FOREIGN KEY (permit_id) REFERENCES dispatch_permits(permit_id),
+    CHECK (
+      (state = 'started'
+        AND request_id IS NOT NULL
+        AND envelope_fingerprint IS NOT NULL
+        AND completed_at IS NULL
+        AND receipt_status IS NULL
+        AND receipt_fingerprint IS NULL
+        AND provider_received_at IS NULL
+        AND reason_code IS NULL)
+      OR
+      (state = 'accepted'
+        AND request_id IS NOT NULL
+        AND envelope_fingerprint IS NOT NULL
+        AND completed_at IS NOT NULL
+        AND receipt_status = 'dispatched'
+        AND receipt_fingerprint IS NOT NULL
+        AND provider_received_at IS NOT NULL)
+      OR
+      (state = 'rejected'
+        AND request_id IS NOT NULL
+        AND envelope_fingerprint IS NOT NULL
+        AND completed_at IS NOT NULL
+        AND receipt_status IN ('blocked', 'failed')
+        AND receipt_fingerprint IS NOT NULL
+        AND provider_received_at IS NOT NULL
+        AND reason_code IS NOT NULL)
+      OR
+      (state = 'legacy_uncertain'
+        AND request_id IS NULL
+        AND envelope_fingerprint IS NULL
+        AND receipt_status IS NULL
+        AND provider_received_at IS NULL
+        AND reason_code IS NULL
+        AND (
+          (completed_at IS NULL AND receipt_fingerprint IS NULL)
+          OR
+          (completed_at IS NOT NULL AND receipt_fingerprint IS NOT NULL)
+        ))
+    )
+  ) STRICT;
+`;
 
 export class PermitDispatchFenceError extends Error {
   constructor(message, code = 'DISPATCH_ATTEMPT_FENCE_FAILED', options = undefined) {
@@ -55,50 +138,7 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
           'DISPATCH_ATTEMPT_RUNTIME_UNSUPPORTED'
         );
       }
-      this.#fenceDb.exec(`
-        PRAGMA foreign_keys = ON;
-        PRAGMA journal_mode = WAL;
-        PRAGMA synchronous = FULL;
-        PRAGMA busy_timeout = ${timeoutMs};
-
-        CREATE TABLE IF NOT EXISTS permit_dispatch_attempts (
-          attempt_id TEXT PRIMARY KEY,
-          permit_id TEXT NOT NULL UNIQUE,
-          idempotency_key TEXT NOT NULL,
-          permit_fingerprint TEXT NOT NULL,
-          request_id TEXT NOT NULL,
-          envelope_fingerprint TEXT NOT NULL,
-          state TEXT NOT NULL CHECK (state IN ('started', 'accepted', 'rejected')),
-          started_at TEXT NOT NULL,
-          completed_at TEXT,
-          receipt_status TEXT CHECK (receipt_status IS NULL OR receipt_status IN ('dispatched', 'blocked', 'failed')),
-          receipt_fingerprint TEXT,
-          provider_received_at TEXT,
-          reason_code TEXT,
-          FOREIGN KEY (permit_id) REFERENCES dispatch_permits(permit_id),
-          CHECK (
-            (state = 'started'
-              AND completed_at IS NULL
-              AND receipt_status IS NULL
-              AND receipt_fingerprint IS NULL
-              AND provider_received_at IS NULL
-              AND reason_code IS NULL)
-            OR
-            (state = 'accepted'
-              AND completed_at IS NOT NULL
-              AND receipt_status = 'dispatched'
-              AND receipt_fingerprint IS NOT NULL
-              AND provider_received_at IS NOT NULL)
-            OR
-            (state = 'rejected'
-              AND completed_at IS NOT NULL
-              AND receipt_status IN ('blocked', 'failed')
-              AND receipt_fingerprint IS NOT NULL
-              AND provider_received_at IS NOT NULL
-              AND reason_code IS NOT NULL)
-          )
-        ) STRICT;
-      `);
+      this.#initializeAttemptStore(timeoutMs);
     } catch (error) {
       try { this.#fenceDb?.close(); } catch { /* preserve initialization failure */ }
       try { super.close(); } catch { /* preserve initialization failure */ }
@@ -344,6 +384,112 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
     return row ? Object.freeze({ ...row }) : null;
   }
 
+  #initializeAttemptStore(timeoutMs) {
+    this.#fenceDb.exec(`
+      PRAGMA foreign_keys = ON;
+      PRAGMA journal_mode = WAL;
+      PRAGMA synchronous = FULL;
+      PRAGMA busy_timeout = ${timeoutMs};
+    `);
+
+    try {
+      this.#fenceDb.exec('BEGIN IMMEDIATE');
+    } catch (error) {
+      throw new PermitDispatchFenceError(
+        'could not acquire the dispatch-attempt schema lock',
+        'DISPATCH_ATTEMPT_SCHEMA_LOCK_UNAVAILABLE',
+        { cause: error }
+      );
+    }
+
+    try {
+      const columns = this.#attemptColumns();
+      if (columns.length === 0) {
+        this.#fenceDb.exec(CREATE_ATTEMPT_TABLE_SQL);
+      } else if (sameColumns(columns, CURRENT_ATTEMPT_COLUMNS)) {
+        // Current schema already installed.
+      } else if (sameColumns(columns, LEGACY_V1_ATTEMPT_COLUMNS)) {
+        this.#migrateLegacyV1AttemptStore();
+      } else {
+        throw new PermitDispatchFenceError(
+          'dispatch-attempt schema is unsupported',
+          'DISPATCH_ATTEMPT_SCHEMA_UNSUPPORTED'
+        );
+      }
+      this.#fenceDb.exec('COMMIT');
+    } catch (error) {
+      let rollbackFailure = null;
+      try {
+        if (this.#fenceDb.isTransaction) this.#fenceDb.exec('ROLLBACK');
+      } catch (rollbackError) {
+        rollbackFailure = rollbackError;
+      }
+      if (rollbackFailure) {
+        throw new PermitDispatchFenceError(
+          'dispatch-attempt schema migration failed and rollback could not be verified',
+          'DISPATCH_ATTEMPT_SCHEMA_ROLLBACK_FAILED',
+          { cause: rollbackFailure }
+        );
+      }
+      if (error instanceof PermitDispatchFenceError) throw error;
+      throw new PermitDispatchFenceError(
+        'dispatch-attempt schema initialization failed',
+        'DISPATCH_ATTEMPT_SCHEMA_INIT_FAILED',
+        { cause: error }
+      );
+    }
+  }
+
+  #attemptColumns() {
+    return this.#fenceDb.prepare(`
+      SELECT name
+      FROM pragma_table_info('permit_dispatch_attempts')
+      ORDER BY cid
+    `).all().map((row) => row.name);
+  }
+
+  #migrateLegacyV1AttemptStore() {
+    this.#fenceDb.exec(`
+      ALTER TABLE permit_dispatch_attempts
+      RENAME TO permit_dispatch_attempts_legacy_v1;
+    `);
+    this.#fenceDb.exec(CREATE_ATTEMPT_TABLE_SQL);
+    this.#fenceDb.exec(`
+      INSERT INTO permit_dispatch_attempts (
+        attempt_id,
+        permit_id,
+        idempotency_key,
+        permit_fingerprint,
+        request_id,
+        envelope_fingerprint,
+        state,
+        started_at,
+        completed_at,
+        receipt_status,
+        receipt_fingerprint,
+        provider_received_at,
+        reason_code
+      )
+      SELECT
+        attempt_id,
+        permit_id,
+        idempotency_key,
+        permit_fingerprint,
+        NULL,
+        NULL,
+        'legacy_uncertain',
+        started_at,
+        accepted_at,
+        NULL,
+        receipt_fingerprint,
+        NULL,
+        NULL
+      FROM permit_dispatch_attempts_legacy_v1;
+
+      DROP TABLE permit_dispatch_attempts_legacy_v1;
+    `);
+  }
+
   #attemptByPermitId(permitId) {
     return this.#fenceDb.prepare(`${ATTEMPT_SELECT}\nWHERE permit_id = ?`).get(permitId) ?? null;
   }
@@ -429,6 +575,12 @@ function assertAttemptBinding(existing, expected) {
       );
     }
   }
+}
+
+function sameColumns(actual, expected) {
+  if (actual.length !== expected.length) return false;
+  const actualSet = new Set(actual);
+  return expected.every((column) => actualSet.has(column));
 }
 
 function permitIdentity(permit) {

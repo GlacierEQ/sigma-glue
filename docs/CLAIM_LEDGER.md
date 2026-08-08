@@ -48,7 +48,7 @@ Before transport entry, the fenced ledger commits:
 
 `permit_id` is unique in the attempt table. Competing writers use `BEGIN IMMEDIATE`, re-read after acquiring the write lock, and converge on one durable reservation.
 
-The lifecycle is:
+The lifecycle for newly created evidence is:
 
 ```text
 issued permit
@@ -66,6 +66,20 @@ Completion stores both:
 - the provider's `receivedAt` as separate **reported evidence**.
 
 The provider timestamp is never promoted into the local transition clock.
+
+## Schema evolution
+
+PR #10 shipped the first `permit_dispatch_attempts` table before request/envelope and outcome-classification evidence existed. Opening that database with the current fenced ledger performs a serialized, transactional migration.
+
+Legacy rows cannot be truthfully reconstructed into the stronger evidence model. In particular, the old `accepted` state did not distinguish a `dispatched` receipt from a valid `blocked`/`failed` receipt. Therefore every migrated legacy row becomes:
+
+```text
+legacy_uncertain
+```
+
+The migration preserves the old attempt identity, permit identity, start time, and any old completion time / receipt fingerprint, but leaves request ID, envelope fingerprint, receipt status, and provider receipt time unknown. The permit remains non-replayable because its migrated row still owns the unique `permit_id`.
+
+Unknown table layouts fail with `DISPATCH_ATTEMPT_SCHEMA_UNSUPPORTED`; the implementation does not guess at migrations it cannot prove.
 
 ## Concurrency
 
@@ -85,6 +99,7 @@ This is a single-host serialization mechanism. Lock unavailability fails closed;
 - strict tables
 - uniqueness on approval, idempotency claim, permit, and per-permit transport attempt identities
 - transactional rollback with explicit rollback-failure reporting
+- transactional migration of the known PR #10 attempt-table schema
 - restart-readable attempt state without raw payload persistence
 
 ## Runtime boundary
