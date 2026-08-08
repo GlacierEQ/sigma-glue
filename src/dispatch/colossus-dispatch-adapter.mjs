@@ -35,8 +35,14 @@ export class ColossusDispatchAdapter {
         'COLOSSUS_TRANSPORT_INVALID'
       );
     }
-    if (!permitStore || typeof permitStore.getPermitByIdempotencyKey !== 'function') {
-      throw new ColossusDispatchError('permit store is required', 'DISPATCH_PERMIT_STORE_INVALID');
+    if (!permitStore ||
+        typeof permitStore.getPermitByIdempotencyKey !== 'function' ||
+        typeof permitStore.beginDispatchAttempt !== 'function' ||
+        typeof permitStore.acceptDispatchAttempt !== 'function') {
+      throw new ColossusDispatchError(
+        'one-shot dispatch permit store is required',
+        'DISPATCH_PERMIT_STORE_INVALID'
+      );
     }
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
       throw new ColossusDispatchError('timeoutMs must be a positive safe integer', 'COLOSSUS_TIMEOUT_INVALID');
@@ -92,15 +98,52 @@ export class ColossusDispatchAdapter {
     };
     const envelopeFingerprint = planFingerprint(envelopeCore);
     const envelope = deepFreeze({ ...envelopeCore, envelopeFingerprint });
-    const receipt = await dispatchOnce(this.#transport, envelope, this.#timeoutMs);
 
-    return validateReceipt(receipt, {
+    let attempt;
+    try {
+      attempt = this.#permitStore.beginDispatchAttempt({
+        permit: normalizedPermit,
+        now
+      });
+    } catch (error) {
+      throw dispatchFenceError(error, 'DISPATCH_ATTEMPT_FENCE_FAILED');
+    }
+
+    const receipt = await dispatchOnce(this.#transport, envelope, this.#timeoutMs);
+    const validatedReceipt = validateReceipt(receipt, {
       request: normalizedRequest,
       permit: normalizedPermit,
       route,
       envelopeFingerprint
     });
+
+    try {
+      this.#permitStore.acceptDispatchAttempt({
+        attemptId: attempt.attemptId,
+        permit: normalizedPermit,
+        receiptFingerprint: planFingerprint(validatedReceipt),
+        now: new Date(validatedReceipt.receivedAt)
+      });
+    } catch (error) {
+      throw new ColossusDispatchError(
+        'Colossus accepted the dispatch but durable one-shot attempt persistence failed',
+        'DISPATCH_ATTEMPT_ACCEPTANCE_FAILED',
+        { cause: error }
+      );
+    }
+
+    return validatedReceipt;
   }
+}
+
+function dispatchFenceError(error, fallbackCode) {
+  const code = typeof error?.code === 'string' && error.code.length > 0
+    ? error.code
+    : fallbackCode;
+  const message = typeof error?.message === 'string' && error.message.length > 0
+    ? error.message
+    : 'dispatch-attempt fence failed';
+  return new ColossusDispatchError(message, code, { cause: error });
 }
 
 async function dispatchOnce(transport, envelope, timeoutMs) {
