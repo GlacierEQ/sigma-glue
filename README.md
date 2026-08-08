@@ -2,7 +2,7 @@
 
 **Federation glue between Sigma UI and independent component repositories.**
 
-Status: **Draft v1** — governing design for the coordination layer.
+Status: **Implemented control-plane slice** — signed approval, durable one-shot mutation authority, provider/reconciliation evidence, and live GitHub provider ambiguity recovery are runnable and verified. Remaining production and platform gates are explicit below.
 
 ---
 
@@ -60,7 +60,7 @@ Sigma UI
 | Reconciliation | Receipt collection + scheduling |
 | Platform matrix | Honest per-platform capability report to Sigma |
 | Diagnostics | Sanitized history only |
-| Recovery | Coordination of recovery workflows |
+| Recovery | Coordination of provider and workflow recovery |
 
 ### Must never own
 
@@ -94,9 +94,25 @@ Illegal transitions **fail closed**.
 5. Ask Gatekeeper for approval bound to that exact fingerprint.
 6. Dispatch through Colossus; never bypass it for mutations.
 7. Pass only scoped handles and the approved envelope to the adapter.
-8. Reuse the same idempotency key on retries.
+8. Reuse the same idempotency subject for the same approved attempt; never silently replay an ambiguous provider mutation.
 9. Reconcile against the provider or platform after every authorized attempt.
 10. Expose verified, reported, inferred, and blocked evidence distinctly in Sigma.
+
+### Provider ambiguity rule
+
+A transport attempt can be locally uncertain after the provider may already have acted. Sigma therefore separates **transport history** from **provider-state recovery**:
+
+```text
+ambiguous provider attempt
+  -> bounded read-only observation
+  -> desired state observed: confirmed_applied, no replay
+  -> exact monotonic baseline revision unchanged: confirmed_not_applied, new approval required
+  -> content-addressed baseline / absence / divergence / inaccessible state: still_unknown, freeze
+```
+
+GitHub blob SHA is explicitly treated as **content-addressed**, not monotonic. Restoring the old bytes can restore the old SHA, so a restored GitHub baseline never proves that the ambiguous mutation did not occur.
+
+See `docs/PROVIDER_RECOVERY.md` for the full contract and live-provider proof boundary.
 
 ### Platform honesty
 
@@ -114,19 +130,21 @@ A shared interface is not proof of shared power. macOS, iOS, and Android adapter
 - Component removal must not corrupt Sigma state.
 - Component refs, adapter versions, protocol versions, and migration receipts remain recoverable.
 
-### Definition of done
+### Definition of done — current proof state
 
-Not operationally verified until tests prove:
-
-- [ ] Exact approval binding (fingerprint)
-- [ ] No scope broadening
-- [ ] Unsupported-method rejection
-- [ ] Stale-plan rejection
-- [ ] One-mutation idempotency
-- [ ] Separate provider confirmation and reconciliation
-- [ ] Redacted diagnostics
-- [ ] Honest three-platform capability reporting
-- [ ] Safe disablement
+- [x] Exact approval binding (fingerprint)
+- [x] No scope broadening on verified mutation paths
+- [x] Unsupported-method rejection
+- [x] Stale-plan / changed-plan rejection
+- [x] Durable one-shot mutation authority for one persisted permit
+- [x] Separate provider confirmation and reconciliation
+- [x] Provider-boundary ambiguity freezes instead of silent replay
+- [x] Restart-readable provider recovery evidence
+- [x] Real GitHub conditional mutation + lost-response recovery canary
+- [x] Redacted diagnostics / no raw provider credentials in durable recovery evidence
+- [ ] Fully evidenced three-platform capability matrix
+- [ ] Production deployment hardening, operational key management, backup/restore, and multi-host coordination
+- [ ] Safe-disablement proof across the complete deployed federation
 
 ---
 
@@ -136,7 +154,7 @@ This repository is the **glue node** in the GlacierEQ federation mesh.
 
 | Node | Role |
 |------|------|
-| **sigma-glue** (this repo) | Workflow orchestration, state, reconciliation |
+| **sigma-glue** (this repo) | Workflow orchestration, state, reconciliation, recovery coordination |
 | **Gatekeeper** | Approval authority (fingerprint-bound) |
 | **Colossus Gateway** | Single routing foundation for mutations |
 | **Commander** | Narrow filesystem / platform execution |
@@ -151,37 +169,39 @@ This repository is the **glue node** in the GlacierEQ federation mesh.
 2. **Never** approve; only request approval with a bound plan fingerprint.
 3. **Never** bypass Colossus for mutations.
 4. **Never** broaden capability beyond the component's declared matrix.
-5. **Always** fail closed on illegal state transitions.
-6. **Always** distinguish verified / reported / inferred / blocked evidence.
-7. **Always** keep Sigma usable when this orchestrator is offline.
+5. **Never** convert provider ambiguity into an automatic replay.
+6. **Always** fail closed on illegal state transitions.
+7. **Always** distinguish verified / reported / inferred / blocked evidence.
+8. **Always** keep Sigma usable when this orchestrator is offline.
 
-### Suggested module map (implementation)
+### Current module map
 
 ```text
 sigma-glue/
   docs/
-    SPEC.md                 # canonical specification
-    STATE_MACHINE.md
-    DISPATCH_RULES.md
+    SPEC.md
+    IMPLEMENTATION_STATUS.md
+    PROVIDER_RECOVERY.md
   src/
-    state/                  # durable job lifecycle
-    normalize/              # request → canonical envelope
-    capability/             # matrix + negotiation (no broadening)
-    plan/                   # plan assembly + fingerprint
-    idempotency/            # ledger + retry keys
-    dispatch/               # Colossus-only mutation path
-    reconcile/              # receipt + confirmation
-    platform/               # macOS / iOS / Android honesty matrix
-    diagnostics/            # redacted history
+    approval/                # Gatekeeper signature/trust binding
+    dispatch/                # Colossus-only request/receipt boundary
+    execution/               # durable execution/reconciliation state
+    ledger/                  # approval, permit, claim, attempt ledgers
+    orchestrator/            # workflow coordination
+    persistence/             # durable job state
+    plan/                    # canonical plan fingerprints
+    protocol/                # protocol/version contracts
+    recovery/                # provider ambiguity classification + durable evidence
+    registry/                # component/capability authority
+    runtime/                 # verified gateway composition
+    state/                   # workflow state machine
+    transport/               # opaque broker transport
+  examples/
+    colossus/                # downstream provider reference adapters
+  scripts/
+    github-provider-live-proof.mjs
   tests/
-    approval_binding/
-    no_scope_broadening/
-    unsupported_rejection/
-    stale_plan/
-    idempotency/
-    reconcile_split/
-    platform_honesty/
-    safe_disable/
+    *.test.mjs               # unit, integration, concurrency, restart, failure attacks
 ```
 
 ### Protocol sketch
@@ -206,6 +226,18 @@ TransitionRecord {
   input_fingerprint
   policy_version
   reason_code
+}
+
+ProviderRecoveryRecord {
+  provider + operation
+  request_id + idempotency_key
+  envelope_fingerprint
+  desired_fingerprint
+  target_fingerprint
+  baseline_version + version_semantics
+  observed_version + version_semantics
+  state + retry_disposition
+  record_fingerprint
 }
 ```
 
