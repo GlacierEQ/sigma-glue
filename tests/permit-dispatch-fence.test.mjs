@@ -8,6 +8,7 @@ import {
   ColossusDispatchAdapter,
   ColossusDispatchError
 } from '../src/dispatch/colossus-dispatch-adapter.mjs';
+import { authorityBindingFingerprint } from '../src/dispatch/request.mjs';
 import { FencedSqliteClaimLedger } from '../src/ledger/fenced-sqlite-claim-ledger.mjs';
 import {
   createTestTrustStore,
@@ -18,7 +19,16 @@ const NOW = new Date('2026-08-01T22:00:00.000Z');
 const REGISTRY = Object.freeze({
   'commander@ref-1': Object.freeze({
     adapterId: 'commander',
-    methods: Object.freeze({ execute: Object.freeze(['filesystem.move']) })
+    methods: Object.freeze({ execute: Object.freeze(['filesystem.move']) }),
+    authority: Object.freeze({
+      'filesystem.move': Object.freeze({
+        minHandles: 1,
+        maxHandles: 1,
+        handles: Object.freeze([
+          Object.freeze({ type: 'filesystem-root', scope: 'move-within-root' })
+        ])
+      })
+    })
   })
 });
 
@@ -50,7 +60,13 @@ function executionSubject(approval = signedApproval()) {
 }
 
 function dispatchRequest(overrides = {}) {
-  return {
+  const requestedHandles = overrides.scopedHandles ?? [{
+    type: 'filesystem-root',
+    id: 'root-fence-1',
+    scope: 'move-within-root',
+    expiresAt: '2026-08-01T22:00:30.000Z'
+  }];
+  const base = {
     protocolVersion: 'sigma-federation/v1',
     schemaVersion: 'colossus-dispatch/v1',
     requestId: 'request-fence-1',
@@ -62,14 +78,17 @@ function dispatchRequest(overrides = {}) {
     idempotencyKey: 'idem-fence-1',
     planFingerprint: 'sha256:plan-fence-1',
     policyVersion: 'policy-v1',
-    scopedHandles: [{
-      type: 'filesystem-root',
-      id: 'root-fence-1',
-      scope: 'move-within-root',
-      expiresAt: '2026-08-01T22:00:30.000Z'
-    }],
     payload: { sourceId: 'file-fence-1', destinationId: 'folder-fence-2' },
     ...overrides
+  };
+  delete base.scopedHandles;
+  const bindingFingerprint = authorityBindingFingerprint(base);
+  return {
+    ...base,
+    scopedHandles: requestedHandles.map((handle) => ({
+      ...handle,
+      bindingFingerprint: handle.bindingFingerprint ?? bindingFingerprint
+    }))
   };
 }
 
