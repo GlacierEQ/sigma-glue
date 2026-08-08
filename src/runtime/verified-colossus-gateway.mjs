@@ -1,3 +1,4 @@
+import { authorityBindingFingerprint } from '../dispatch/request.mjs';
 import { markProvablyPreProviderBoundary } from '../orchestrator/provider-boundary-proof.mjs';
 import { planFingerprint } from '../plan/fingerprint.mjs';
 
@@ -9,17 +10,6 @@ export class VerifiedColossusGatewayError extends Error {
   }
 }
 
-/**
- * Composes the signed approval/permit path, one-shot Colossus dispatch,
- * append-only execution evidence, provider confirmation, and reconciliation
- * behind the existing SigmaOrchestrator { dispatch, reconcile } gateway shape.
- *
- * The gateway owns the dispatch projection and durable phase boundaries. The
- * deployment-supplied authority may provide only capability/scoped handles;
- * the evidence bridge may provide only provider confirmation and reconciliation
- * observations. Attempt/reconciliation start records are created here before
- * awaiting external work so crashes remain restart-readable.
- */
 export class VerifiedColossusGateway {
   #permitLedger;
   #dispatchCoordinator;
@@ -41,16 +31,10 @@ export class VerifiedColossusGateway {
         typeof permitLedger.registerApproval !== 'function' ||
         typeof permitLedger.claimDispatchPermit !== 'function' ||
         typeof permitLedger.getDispatchAttemptByPermitId !== 'function') {
-      throw new VerifiedColossusGatewayError(
-        'signed one-shot permit ledger is required',
-        'SIGNED_PERMIT_LEDGER_INVALID'
-      );
+      throw new VerifiedColossusGatewayError('signed one-shot permit ledger is required', 'SIGNED_PERMIT_LEDGER_INVALID');
     }
     if (!dispatchCoordinator || typeof dispatchCoordinator.dispatchAndRecord !== 'function') {
-      throw new VerifiedColossusGatewayError(
-        'durable dispatch coordinator is required',
-        'DURABLE_DISPATCH_COORDINATOR_INVALID'
-      );
+      throw new VerifiedColossusGatewayError('durable dispatch coordinator is required', 'DURABLE_DISPATCH_COORDINATOR_INVALID');
     }
     if (!executionLedger ||
         typeof executionLedger.recordAttempt !== 'function' ||
@@ -60,31 +44,18 @@ export class VerifiedColossusGateway {
         typeof executionLedger.getOperationByRequestId !== 'function' ||
         typeof executionLedger.getEvents !== 'function' ||
         typeof executionLedger.verifyEventChain !== 'function') {
-      throw new VerifiedColossusGatewayError(
-        'verified execution ledger is required',
-        'VERIFIED_EXECUTION_LEDGER_INVALID'
-      );
+      throw new VerifiedColossusGatewayError('verified execution ledger is required', 'VERIFIED_EXECUTION_LEDGER_INVALID');
     }
     if (typeof dispatchAuthority !== 'function') {
-      throw new VerifiedColossusGatewayError(
-        'dispatch authority provider is required',
-        'DISPATCH_AUTHORITY_INVALID'
-      );
+      throw new VerifiedColossusGatewayError('dispatch authority provider is required', 'DISPATCH_AUTHORITY_INVALID');
     }
     if (!evidenceBridge ||
         typeof evidenceBridge.awaitProviderConfirmation !== 'function' ||
         typeof evidenceBridge.reconcile !== 'function') {
-      throw new VerifiedColossusGatewayError(
-        'provider evidence bridge is required',
-        'PROVIDER_EVIDENCE_BRIDGE_INVALID'
-      );
+      throw new VerifiedColossusGatewayError('provider evidence bridge is required', 'PROVIDER_EVIDENCE_BRIDGE_INVALID');
     }
-    if (typeof evidenceBridge.observationMethod !== 'string' ||
-        evidenceBridge.observationMethod.trim() === '') {
-      throw new VerifiedColossusGatewayError(
-        'provider evidence bridge observationMethod is required',
-        'RECONCILIATION_METHOD_INVALID'
-      );
+    if (typeof evidenceBridge.observationMethod !== 'string' || evidenceBridge.observationMethod.trim() === '') {
+      throw new VerifiedColossusGatewayError('provider evidence bridge observationMethod is required', 'RECONCILIATION_METHOD_INVALID');
     }
     if (typeof now !== 'function') {
       throw new VerifiedColossusGatewayError('clock must be a function', 'CLOCK_INVALID');
@@ -102,7 +73,6 @@ export class VerifiedColossusGateway {
   async dispatch(input) {
     const subject = orchestrationSubject(input);
     let permit = null;
-
     try {
       const approvalNow = this.#date();
       this.#permitLedger.registerApproval({ approval: input.approval, now: approvalNow });
@@ -120,17 +90,31 @@ export class VerifiedColossusGateway {
       });
 
       const requestId = requestIdentity(subject);
+      const payload = canonicalPlanPayload(input.plan);
+      const authorityBindingForCapability = (capability) => authorityBindingFingerprint({
+        requestId,
+        jobId: subject.jobId,
+        componentRef: subject.componentRef,
+        method: subject.method,
+        capability,
+        idempotencyKey: subject.idempotencyKey,
+        planFingerprint: subject.planFingerprint,
+        policyVersion: subject.policyVersion,
+        payload
+      });
       const authority = normalizeDispatchAuthority(await this.#dispatchAuthority({
         ...input,
         permit,
         requestId,
+        authorityBindingForCapability,
         now: this.#date()
       }));
       const request = buildPlanBoundDispatchRequest({
         input,
         subject,
         requestId,
-        authority
+        authority,
+        payload
       });
 
       const dispatched = await this.#dispatchCoordinator.dispatchAndRecord({
@@ -170,10 +154,7 @@ export class VerifiedColossusGateway {
         now: this.#date()
       });
       if (!confirmation || typeof confirmation !== 'object') {
-        throw new VerifiedColossusGatewayError(
-          'provider evidence bridge returned incomplete confirmation evidence',
-          'PROVIDER_EVIDENCE_INCOMPLETE'
-        );
+        throw new VerifiedColossusGatewayError('provider evidence bridge returned incomplete confirmation evidence', 'PROVIDER_EVIDENCE_INCOMPLETE');
       }
       operation = this.#executionLedger.recordProviderConfirmation({
         operationId: operation.operationId,
@@ -183,10 +164,7 @@ export class VerifiedColossusGateway {
       });
       const chain = this.#executionLedger.verifyEventChain(operation.operationId);
       if (!chain?.valid || operation.state !== 'provider_confirmed') {
-        throw new VerifiedColossusGatewayError(
-          'provider confirmation did not produce a verified execution head',
-          'PROVIDER_CONFIRMATION_NOT_VERIFIED'
-        );
+        throw new VerifiedColossusGatewayError('provider confirmation did not produce a verified execution head', 'PROVIDER_CONFIRMATION_NOT_VERIFIED');
       }
 
       return Object.freeze({
@@ -211,32 +189,17 @@ export class VerifiedColossusGateway {
     const subject = orchestrationSubject(input);
     const requestId = requestIdentity(subject);
     let operation = this.#executionLedger.getOperationByRequestId(requestId);
-    if (!operation) {
-      throw new VerifiedColossusGatewayError(
-        'durable execution operation was not found for reconciliation',
-        'EXECUTION_OPERATION_NOT_FOUND'
-      );
-    }
+    if (!operation) throw new VerifiedColossusGatewayError('durable execution operation was not found for reconciliation', 'EXECUTION_OPERATION_NOT_FOUND');
     if (operation.idempotencyKey !== subject.idempotencyKey ||
         operation.componentRef !== subject.componentRef ||
         operation.method !== subject.method ||
         operation.state !== 'provider_confirmed') {
-      throw new VerifiedColossusGatewayError(
-        'reconciliation operation does not match the provider-confirmed orchestration subject',
-        'RECONCILIATION_SUBJECT_MISMATCH'
-      );
+      throw new VerifiedColossusGatewayError('reconciliation operation does not match the provider-confirmed orchestration subject', 'RECONCILIATION_SUBJECT_MISMATCH');
     }
 
     const events = this.#executionLedger.getEvents(operation.operationId);
-    const confirmationEvent = [...events].reverse().find(
-      (event) => event.eventType === 'provider.confirmed'
-    );
-    if (!confirmationEvent) {
-      throw new VerifiedColossusGatewayError(
-        'provider confirmation evidence is missing',
-        'PROVIDER_CONFIRMATION_EVIDENCE_MISSING'
-      );
-    }
+    const confirmationEvent = [...events].reverse().find((event) => event.eventType === 'provider.confirmed');
+    if (!confirmationEvent) throw new VerifiedColossusGatewayError('provider confirmation evidence is missing', 'PROVIDER_CONFIRMATION_EVIDENCE_MISSING');
 
     const reconciliationAt = this.#date();
     const reconciliationStart = Object.freeze({
@@ -259,10 +222,7 @@ export class VerifiedColossusGateway {
       now: this.#date()
     });
     if (!result || typeof result !== 'object') {
-      throw new VerifiedColossusGatewayError(
-        'provider evidence bridge returned incomplete reconciliation evidence',
-        'RECONCILIATION_EVIDENCE_INCOMPLETE'
-      );
+      throw new VerifiedColossusGatewayError('provider evidence bridge returned incomplete reconciliation evidence', 'RECONCILIATION_EVIDENCE_INCOMPLETE');
     }
 
     operation = this.#executionLedger.completeReconciliation({
@@ -272,18 +232,8 @@ export class VerifiedColossusGateway {
       now: this.#date()
     });
     const chain = this.#executionLedger.verifyEventChain(operation.operationId);
-    if (!chain?.valid) {
-      throw new VerifiedColossusGatewayError(
-        'reconciliation did not preserve the verified execution chain',
-        'RECONCILIATION_CHAIN_INVALID'
-      );
-    }
-    if (operation.state !== 'reconciled') {
-      throw new VerifiedColossusGatewayError(
-        'provider state did not reconcile to the confirmed expectation',
-        'RECONCILIATION_FAILED'
-      );
-    }
+    if (!chain?.valid) throw new VerifiedColossusGatewayError('reconciliation did not preserve the verified execution chain', 'RECONCILIATION_CHAIN_INVALID');
+    if (operation.state !== 'reconciled') throw new VerifiedColossusGatewayError('provider state did not reconcile to the confirmed expectation', 'RECONCILIATION_FAILED');
 
     return Object.freeze({
       status: 'reconciled',
@@ -303,11 +253,8 @@ export class VerifiedColossusGateway {
     let providerBoundaryEntered = false;
     if (permit) {
       try {
-        providerBoundaryEntered = Boolean(
-          this.#permitLedger.getDispatchAttemptByPermitId(permit.permitId)
-        );
+        providerBoundaryEntered = Boolean(this.#permitLedger.getDispatchAttemptByPermitId(permit.permitId));
       } catch {
-        // Failure to prove absence is treated as provider-boundary uncertainty.
         providerBoundaryEntered = true;
       }
     }
@@ -316,9 +263,7 @@ export class VerifiedColossusGateway {
       error?.code || 'VERIFIED_COLOSSUS_DISPATCH_FAILED',
       { cause: error }
     );
-    return providerBoundaryEntered
-      ? classified
-      : markProvablyPreProviderBoundary(classified);
+    return providerBoundaryEntered ? classified : markProvablyPreProviderBoundary(classified);
   }
 
   #date() {
@@ -330,7 +275,7 @@ export class VerifiedColossusGateway {
   }
 }
 
-function buildPlanBoundDispatchRequest({ input, subject, requestId, authority }) {
+function buildPlanBoundDispatchRequest({ input, subject, requestId, authority, payload }) {
   const plan = input.plan;
   return Object.freeze({
     protocolVersion: requiredString(plan.protocolVersion, 'plan.protocolVersion'),
@@ -345,22 +290,17 @@ function buildPlanBoundDispatchRequest({ input, subject, requestId, authority })
     planFingerprint: subject.planFingerprint,
     policyVersion: subject.policyVersion,
     scopedHandles: authority.scopedHandles,
-    payload: canonicalPlanPayload(plan)
+    payload
   });
 }
 
 function canonicalPlanPayload(plan) {
   if (!Array.isArray(plan.items) || plan.items.length === 0) {
-    throw new VerifiedColossusGatewayError(
-      'approved plan must contain mutation items',
-      'PLAN_PAYLOAD_INVALID'
-    );
+    throw new VerifiedColossusGatewayError('approved plan must contain mutation items', 'PLAN_PAYLOAD_INVALID');
   }
   return Object.freeze({
     operation: requiredString(plan.operation, 'plan.operation'),
-    provider: Object.freeze({
-      stableId: requiredString(plan.provider?.stableId, 'plan.provider.stableId')
-    }),
+    provider: Object.freeze({ stableId: requiredString(plan.provider?.stableId, 'plan.provider.stableId') }),
     items: Object.freeze(plan.items.map((item, index) => Object.freeze({
       stableId: requiredString(item?.stableId, `plan.items[${index}].stableId`),
       source: requiredString(item?.source, `plan.items[${index}].source`),
@@ -371,25 +311,14 @@ function canonicalPlanPayload(plan) {
 
 function normalizeDispatchAuthority(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new VerifiedColossusGatewayError(
-      'dispatch authority must be an object',
-      'DISPATCH_AUTHORITY_INVALID'
-    );
+    throw new VerifiedColossusGatewayError('dispatch authority must be an object', 'DISPATCH_AUTHORITY_INVALID');
   }
-  const unknown = Object.keys(value).filter(
-    (field) => !['capability', 'scopedHandles'].includes(field)
-  );
+  const unknown = Object.keys(value).filter((field) => !['capability', 'scopedHandles'].includes(field));
   if (unknown.length > 0) {
-    throw new VerifiedColossusGatewayError(
-      `dispatch authority cannot supply ${unknown[0]}`,
-      'DISPATCH_AUTHORITY_FIELD_FORBIDDEN'
-    );
+    throw new VerifiedColossusGatewayError(`dispatch authority cannot supply ${unknown[0]}`, 'DISPATCH_AUTHORITY_FIELD_FORBIDDEN');
   }
   if (!Array.isArray(value.scopedHandles)) {
-    throw new VerifiedColossusGatewayError(
-      'dispatch authority scopedHandles must be an array',
-      'DISPATCH_AUTHORITY_INVALID'
-    );
+    throw new VerifiedColossusGatewayError('dispatch authority scopedHandles must be an array', 'DISPATCH_AUTHORITY_INVALID');
   }
   return Object.freeze({
     capability: requiredString(value.capability, 'dispatchAuthority.capability'),
@@ -399,10 +328,7 @@ function normalizeDispatchAuthority(value) {
 
 function orchestrationSubject(input) {
   if (!input || typeof input !== 'object' || !input.plan || !input.approval) {
-    throw new VerifiedColossusGatewayError(
-      'orchestration plan and approval are required',
-      'ORCHESTRATION_SUBJECT_INVALID'
-    );
+    throw new VerifiedColossusGatewayError('orchestration plan and approval are required', 'ORCHESTRATION_SUBJECT_INVALID');
   }
   const plan = input.plan;
   const approval = input.approval;
@@ -419,12 +345,8 @@ function orchestrationSubject(input) {
   if (plan.componentRef !== subject.componentRef || plan.method !== subject.method ||
       plan.operation !== subject.operation || approval.jobId !== subject.jobId ||
       approval.componentRef !== subject.componentRef || approval.method !== subject.method ||
-      approval.idempotencyKey !== subject.idempotencyKey ||
-      approval.planFingerprint !== subject.planFingerprint) {
-    throw new VerifiedColossusGatewayError(
-      'orchestration input is not exactly bound to the plan and approval',
-      'ORCHESTRATION_SUBJECT_MISMATCH'
-    );
+      approval.idempotencyKey !== subject.idempotencyKey || approval.planFingerprint !== subject.planFingerprint) {
+    throw new VerifiedColossusGatewayError('orchestration input is not exactly bound to the plan and approval', 'ORCHESTRATION_SUBJECT_MISMATCH');
   }
   return Object.freeze(subject);
 }
@@ -452,10 +374,7 @@ function executionAttemptIdentity(operation) {
 
 function requiredString(value, field) {
   if (typeof value !== 'string' || value.trim() === '') {
-    throw new VerifiedColossusGatewayError(
-      `${field} must be a non-empty string`,
-      'ORCHESTRATION_SUBJECT_INVALID'
-    );
+    throw new VerifiedColossusGatewayError(`${field} must be a non-empty string`, 'ORCHESTRATION_SUBJECT_INVALID');
   }
   return value;
 }

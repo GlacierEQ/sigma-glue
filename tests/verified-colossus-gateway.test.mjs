@@ -44,6 +44,15 @@ const DISPATCH_REGISTRY = Object.freeze({
     methods: Object.freeze({
       execute: Object.freeze(['filesystem.move']),
       compensate: Object.freeze(['filesystem.move'])
+    }),
+    authority: Object.freeze({
+      'filesystem.move': Object.freeze({
+        minHandles: 1,
+        maxHandles: 1,
+        handles: Object.freeze([
+          Object.freeze({ type: 'filesystem-root', scope: 'move-within-root' })
+        ])
+      })
     })
   })
 });
@@ -170,12 +179,13 @@ async function withSystem(run, {
     executionLedger
   });
 
-  const dispatchAuthority = ({ permit, now }) => {
+  const dispatchAuthority = ({ permit, now, authorityBindingForCapability }) => {
     authorityCalls += 1;
     const injectExtra = authorityExtra &&
       (!authorityExtraFirstOnly || authorityCalls === 1);
+    const capability = 'filesystem.move';
     return {
-      capability: 'filesystem.move',
+      capability,
       scopedHandles: [{
         type: 'filesystem-root',
         id: 'test-root',
@@ -183,7 +193,8 @@ async function withSystem(run, {
         expiresAt: new Date(Math.min(
           Date.parse(permit.expiresAt),
           now.getTime() + 30_000
-        )).toISOString()
+        )).toISOString(),
+        bindingFingerprint: authorityBindingForCapability(capability)
       }],
       ...(injectExtra ? authorityExtra : {})
     };
