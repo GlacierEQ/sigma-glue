@@ -29,7 +29,7 @@ function request() {
 function gatekeeper() {
   let sequence = 0;
   return {
-    requestApproval: async ({ jobId, componentRef, method, plan }) => ({
+    requestApproval: async ({ jobId, componentRef, method, policyVersion, plan }) => ({
       approvalId: `approval-${++sequence}`,
       status: 'approved',
       jobId,
@@ -37,6 +37,8 @@ function gatekeeper() {
       method,
       idempotencyKey: plan.idempotencyKey,
       planFingerprint: plan.planFingerprint,
+      policyVersion,
+      issuedAt: '2026-08-01T00:00:00Z',
       expiresAt: '2099-01-01T00:00:00Z'
     })
   };
