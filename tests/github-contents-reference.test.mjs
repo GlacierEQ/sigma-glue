@@ -6,9 +6,9 @@ import {
   GitHubContentsColossusTransport,
   GitHubContentsProviderObserver,
   GitHubContentsProviderUncertainError,
-  githubContentFingerprint,
-  githubContentsIntent
+  githubContentFingerprint
 } from '../examples/colossus/github-contents-reference.mjs';
+import { githubContentsPayload } from '../examples/colossus/github-contents-payload.mjs';
 import { ProviderOutcomeRecoveryCoordinator } from '../src/recovery/provider-outcome-recovery.mjs';
 import { planFingerprint } from '../src/plan/fingerprint.mjs';
 
@@ -114,7 +114,7 @@ test('conditional write mutates once and an identical replay performs no second 
     credentialHandle: 'credh_testgithub1',
     clock: () => NOW
   });
-  const intent = githubContentsIntent({
+  const intent = githubContentsPayload({
     target: TARGET,
     desiredContent: 'after',
     baseline: baselineFor(state),
@@ -143,7 +143,7 @@ test('changed provider baseline blocks before mutation', async () => {
     contentFingerprint: githubContentFingerprint('old-state'),
     version: 'blob-old'
   };
-  const result = await transport.dispatch(envelope(githubContentsIntent({
+  const result = await transport.dispatch(envelope(githubContentsPayload({
     target: TARGET,
     desiredContent: 'desired',
     baseline: staleBaseline,
@@ -159,7 +159,7 @@ test('changed provider baseline blocks before mutation', async () => {
 test('lost mutation response becomes recoverable confirmed_applied evidence', async () => {
   const state = stateRecord('before');
   const broker = fakeBroker(state, { loseNextPutResponse: true });
-  const intent = githubContentsIntent({
+  const intent = githubContentsPayload({
     target: TARGET,
     desiredContent: 'after-lost-response',
     baseline: baselineFor(state),
@@ -204,7 +204,7 @@ test('lost mutation response becomes recoverable confirmed_applied evidence', as
 test('observation of unchanged baseline requires a new authorization rather than automatic retry', async () => {
   const state = stateRecord('before');
   const broker = fakeBroker(state);
-  const intent = githubContentsIntent({
+  const intent = githubContentsPayload({
     target: TARGET,
     desiredContent: 'never-written',
     baseline: baselineFor(state),
@@ -216,7 +216,7 @@ test('observation of unchanged baseline requires a new authorization rather than
     idempotencyKey: 'idem-not-applied',
     requestId: 'request-not-applied',
     envelopeFingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
-    desiredFingerprint: intent.desiredFingerprint,
+    desiredFingerprint: intent.desired.fingerprint,
     target: TARGET,
     baseline: intent.baseline
   };
@@ -235,11 +235,11 @@ test('observation of unchanged baseline requires a new authorization rather than
 });
 
 test('desired fingerprint exactly binds desired bytes', () => {
-  const valid = githubContentsIntent({
+  const valid = githubContentsPayload({
     target: TARGET,
     desiredContent: 'desired',
     baseline: { exists: false, contentFingerprint: null, version: null },
     commitMessage: 'valid'
   });
-  assert.equal(valid.desiredFingerprint, githubContentFingerprint('desired'));
+  assert.equal(valid.desired.fingerprint, githubContentFingerprint('desired'));
 });
