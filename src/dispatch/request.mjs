@@ -13,6 +13,19 @@ const REQUEST_FIELDS = Object.freeze([
   'componentRef', 'method', 'capability', 'idempotencyKey',
   'planFingerprint', 'policyVersion', 'scopedHandles', 'payload'
 ]);
+const HANDLE_FIELDS = Object.freeze([
+  'type',
+  'id',
+  'scope',
+  'issuedAt',
+  'expiresAt',
+  'bindingFingerprint',
+  'issuer',
+  'keyId',
+  'signatureAlgorithm',
+  'signatureVersion',
+  'signature'
+]);
 
 export function normalizeRequest(request) {
   request = cloneCanonical(request);
@@ -60,12 +73,25 @@ export function authorityBindingFingerprint(request) {
   return planFingerprint(subject);
 }
 
-export function validateScopedHandles(handles, now, permitExpiresAt, request, authorityPolicy) {
+export function validateScopedHandles(
+  handles,
+  now,
+  permitExpiresAt,
+  request,
+  authorityPolicy,
+  verifiedAuthorities
+) {
   const nowMs = validDate(now, 'DISPATCH_TIME_INVALID');
   const permitExpiresMs = validTimestamp(permitExpiresAt, 'DISPATCH_PERMIT_INVALID');
   const ids = new Set();
   if (!authorityPolicy || typeof authorityPolicy !== 'object') {
     throw new ColossusDispatchError('scoped handle policy is required', 'SCOPED_HANDLE_POLICY_MISSING');
+  }
+  if (!Array.isArray(verifiedAuthorities) || verifiedAuthorities.length !== handles.length) {
+    throw new ColossusDispatchError(
+      'scoped handle authenticity evidence is missing',
+      'SCOPED_HANDLE_AUTHENTICITY_MISSING'
+    );
   }
   if (handles.length < authorityPolicy.minHandles || handles.length > authorityPolicy.maxHandles) {
     throw new ColossusDispatchError(
@@ -79,18 +105,18 @@ export function validateScopedHandles(handles, now, permitExpiresAt, request, au
     if (!handle || typeof handle !== 'object' || Array.isArray(handle)) {
       throw new ColossusDispatchError(`scoped handle ${index} is invalid`, 'SCOPED_HANDLE_INVALID');
     }
-    const allowed = ['type', 'id', 'scope', 'expiresAt', 'bindingFingerprint'];
-    const unknown = Object.keys(handle).find((key) => !allowed.includes(key));
+    const unknown = Object.keys(handle).find((key) => !HANDLE_FIELDS.includes(key));
     if (unknown) {
       throw new ColossusDispatchError(
         `scoped handle contains unsupported field ${unknown}`,
         'SCOPED_HANDLE_INVALID'
       );
     }
-    for (const field of allowed) requireString(handle[field], field, 'SCOPED_HANDLE_INVALID');
+    for (const field of HANDLE_FIELDS) requireString(handle[field], field, 'SCOPED_HANDLE_INVALID');
+    const issuedMs = validTimestamp(handle.issuedAt, 'SCOPED_HANDLE_INVALID');
     const expiresMs = validTimestamp(handle.expiresAt, 'SCOPED_HANDLE_INVALID');
-    if (expiresMs <= nowMs || expiresMs > permitExpiresMs) {
-      throw new ColossusDispatchError('scoped handle expiry exceeds authority window', 'SCOPED_HANDLE_EXPIRED');
+    if (issuedMs > nowMs || expiresMs <= nowMs || expiresMs > permitExpiresMs || issuedMs >= expiresMs) {
+      throw new ColossusDispatchError('scoped handle validity exceeds authority window', 'SCOPED_HANDLE_EXPIRED');
     }
     if (handle.bindingFingerprint !== expectedBinding) {
       throw new ColossusDispatchError(
@@ -106,6 +132,25 @@ export function validateScopedHandles(handles, now, permitExpiresAt, request, au
         'SCOPED_HANDLE_POLICY_MISMATCH'
       );
     }
+
+    const authenticity = verifiedAuthorities[index];
+    if (!authenticity?.verified ||
+        authenticity.issuer !== handle.issuer ||
+        authenticity.keyId !== handle.keyId) {
+      throw new ColossusDispatchError(
+        'scoped handle authenticity does not match the signed envelope',
+        'SCOPED_HANDLE_AUTHENTICITY_MISMATCH'
+      );
+    }
+    if (!authorityPolicy.issuers.some(
+      (allowed) => allowed.issuer === authenticity.issuer && allowed.keyId === authenticity.keyId
+    )) {
+      throw new ColossusDispatchError(
+        'scoped handle issuer is not authorized for this capability',
+        'SCOPED_HANDLE_ISSUER_NOT_ALLOWED'
+      );
+    }
+
     if (ids.has(handle.id)) {
       throw new ColossusDispatchError('duplicate scoped handle id', 'SCOPED_HANDLE_INVALID');
     }
