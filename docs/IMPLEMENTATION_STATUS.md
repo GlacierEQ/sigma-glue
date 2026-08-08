@@ -22,6 +22,30 @@
 - The known PR #10 attempt-table schema migrates transactionally; legacy rows become non-replayable `legacy_uncertain` evidence rather than being overclaimed as exact modern evidence.
 - Unknown attempt-table layouts fail closed instead of receiving a guessed migration.
 
+### Provider ambiguity recovery
+
+- Provider uncertainty records bind provider, operation, idempotency key, request ID, exact dispatch-envelope fingerprint, desired-state fingerprint, exact target, and original provider baseline.
+- Recovery observation is bounded by a fail-closed timeout and receives an AbortSignal.
+- Desired state observed -> `confirmed_applied` -> no replay; proceed to reconciliation.
+- Exact original baseline observed -> `confirmed_not_applied` -> retry requires a new authorization.
+- Divergent, inaccessible, failed, or timed-out observation -> `still_unknown` -> automatic replay forbidden.
+- Provider recovery classifications are persisted to a separate SQLite evidence ledger as stable identities/fingerprints, not raw mutation payloads or credentials.
+- Exact duplicate recovery records are idempotent; conflicting evidence for one request fails closed; recovery records survive close/reopen.
+- The original ambiguous one-shot dispatch remains `started`; recovery does not synthesize a dispatch receipt that was never observed.
+
+### Real GitHub Contents provider proof
+
+- A downstream GitHub Contents reference provider lives under `examples/colossus/`; Sigma remains the recovery coordinator and does not become a competing provider gateway.
+- GitHub credentials remain inside an opaque broker and are never included in Sigma plans or durable recovery evidence.
+- GitHub file `sha` is used as the exact conditional-write version for updates.
+- Current provider state is read before mutation and compared with the exact approved baseline.
+- An already-converged desired fingerprint performs no second PUT.
+- Stale baseline conflicts block before mutation.
+- 409/422 conditional conflicts are independently read back and classified as converged or conflicting.
+- Transport failure, provider 5xx, and malformed/incomplete 2xx mutation evidence are treated as ambiguous outcomes requiring recovery rather than false failure.
+- A file 404 is treated as absence only after the repository and branch independently resolve; hidden/unresolved scope remains unknown.
+- A dedicated serialized GitHub Actions canary performs real repository mutations, deliberately discards one successful provider response, recovers the applied state by independent read-back, persists the recovery receipt across close/reopen, and proves the original permit cannot reach a second provider write.
+
 ### Colossus composition and execution evidence
 
 - Colossus is a required mutation boundary for `SigmaOrchestrator`; direct Commander mutation dispatch is rejected.
@@ -42,18 +66,21 @@
 - Dispatch receipts cannot overclaim provider confirmation.
 - Opaque credential-broker HTTP transport rejects insecure endpoints, redirects, oversized responses, malformed JSON, and broker-detail leakage.
 
-### Local runnable proof
+### Local and live runnable proof
 
 - Test-root Commander execution with path containment, symlink escape rejection, idempotency, and compensating recovery coverage.
 - Local durable job snapshots and redacted lifecycle receipts avoid persisting raw plan paths or credential-like fields in the tested persistence surfaces.
 - Native GitHub Actions runs the full `npm test` suite on Node 22 for pull-request candidates.
+- A separate write-scoped GitHub Actions workflow exercises the real GitHub Contents provider recovery contract on the dedicated canary branch and target.
 
 ## Explicit boundaries and unresolved production work
 
 - The SQLite ledgers are **single-host durability mechanisms**, not distributed consensus or multi-host exactly-once services.
 - The permit fence proves **at-most-once transport entry for one persisted permit**; it does not prove provider-transactional exactly-once execution.
-- A durable `started` or migrated `legacy_uncertain` transport attempt is an uncertainty state requiring reconciliation because the provider may already have acted.
-- Provider-side duplicate suppression is not assumed unless a provider adapter proves it.
-- The repository verifies injected/fixture boundaries; it does not by itself prove live production Gatekeeper, Colossus, Commander, or provider deployments.
+- Provider-aware recovery can prove `confirmed_applied`, `confirmed_not_applied`, or `still_unknown` only to the strength of the provider's read/write consistency and version semantics.
+- A durable `started` or migrated `legacy_uncertain` transport attempt remains historical transport evidence even after a separate provider recovery record resolves the provider state.
+- `confirmed_not_applied` never reuses the old approval; a new mutation attempt requires a new Gatekeeper authorization.
+- The GitHub reference proves one concrete provider contract; other providers require their own idempotency, conditional-write, consistency, and recovery contracts.
+- The live canary proves repository-scoped GitHub mutation/recovery behavior, not general live production deployment of Gatekeeper, Colossus, Commander, or every provider adapter.
 - Encryption-at-rest, operational key management, backup/restore procedures, a general future schema-versioning policy, multi-host coordination, and production deployment hardening remain separate gates.
 - `node:sqlite` is an evolving runtime surface; the repository declares the minimum Node runtime required by the transaction-state API it uses.
