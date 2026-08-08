@@ -4,6 +4,7 @@ import { planFingerprint } from '../plan/fingerprint.mjs';
 import { providerRecoveryFingerprint } from './provider-outcome-recovery.mjs';
 
 const STATES = new Set(['confirmed_applied', 'confirmed_not_applied', 'still_unknown']);
+const VERSION_SEMANTICS = new Set(['monotonic_revision', 'content_addressed', 'unknown']);
 
 export class ProviderRecoveryLedgerError extends Error {
   constructor(message, code = 'PROVIDER_RECOVERY_LEDGER_FAILED', options = undefined) {
@@ -47,36 +48,51 @@ export class SqliteProviderRecoveryLedger {
           baseline_exists INTEGER NOT NULL CHECK (baseline_exists IN (0, 1)),
           baseline_content_fingerprint TEXT,
           baseline_version TEXT,
+          baseline_version_semantics TEXT NOT NULL CHECK (
+            baseline_version_semantics IN ('monotonic_revision', 'content_addressed', 'unknown')
+          ),
           state TEXT NOT NULL CHECK (state IN ('confirmed_applied', 'confirmed_not_applied', 'still_unknown')),
           reason_code TEXT NOT NULL,
           retry_disposition TEXT NOT NULL,
           observation_exists INTEGER CHECK (observation_exists IS NULL OR observation_exists IN (0, 1)),
           observation_content_fingerprint TEXT,
           observation_version TEXT,
+          observation_version_semantics TEXT CHECK (
+            observation_version_semantics IS NULL OR
+            observation_version_semantics IN ('monotonic_revision', 'content_addressed', 'unknown')
+          ),
           provider_request_id TEXT,
           observation_time TEXT,
           recorded_at TEXT NOT NULL,
           record_fingerprint TEXT NOT NULL,
           CHECK (
-            (baseline_exists = 0 AND baseline_content_fingerprint IS NULL AND baseline_version IS NULL)
+            (baseline_exists = 0
+              AND baseline_content_fingerprint IS NULL
+              AND baseline_version IS NULL
+              AND baseline_version_semantics = 'unknown')
             OR
-            (baseline_exists = 1 AND baseline_content_fingerprint IS NOT NULL AND baseline_version IS NOT NULL)
+            (baseline_exists = 1
+              AND baseline_content_fingerprint IS NOT NULL
+              AND baseline_version IS NOT NULL)
           ),
           CHECK (
             (observation_exists IS NULL
               AND observation_content_fingerprint IS NULL
               AND observation_version IS NULL
+              AND observation_version_semantics IS NULL
               AND provider_request_id IS NULL
               AND observation_time IS NULL)
             OR
             (observation_exists = 0
               AND observation_content_fingerprint IS NULL
               AND observation_version IS NULL
+              AND observation_version_semantics = 'unknown'
               AND observation_time IS NOT NULL)
             OR
             (observation_exists = 1
               AND observation_content_fingerprint IS NOT NULL
               AND observation_version IS NOT NULL
+              AND observation_version_semantics IS NOT NULL
               AND observation_time IS NOT NULL)
           )
         ) STRICT;
@@ -120,11 +136,13 @@ export class SqliteProviderRecoveryLedger {
             request_id, idempotency_key, provider, operation,
             envelope_fingerprint, desired_fingerprint, target_fingerprint,
             baseline_exists, baseline_content_fingerprint, baseline_version,
+            baseline_version_semantics,
             state, reason_code, retry_disposition,
             observation_exists, observation_content_fingerprint,
-            observation_version, provider_request_id, observation_time,
+            observation_version, observation_version_semantics,
+            provider_request_id, observation_time,
             recorded_at, record_fingerprint
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `).run(
           normalized.uncertainty.requestId,
           normalized.uncertainty.idempotencyKey,
@@ -136,12 +154,14 @@ export class SqliteProviderRecoveryLedger {
           normalized.uncertainty.baseline.exists ? 1 : 0,
           normalized.uncertainty.baseline.contentFingerprint,
           normalized.uncertainty.baseline.version,
+          normalized.uncertainty.baseline.versionSemantics,
           normalized.state,
           normalized.reasonCode,
           normalized.retryDisposition,
           observation === null ? null : observation.exists ? 1 : 0,
           observation?.contentFingerprint ?? null,
           observation?.version ?? null,
+          observation?.versionSemantics ?? null,
           observation?.providerRequestId ?? null,
           observation?.observedAt ?? null,
           recordedAt,
@@ -181,12 +201,14 @@ export class SqliteProviderRecoveryLedger {
         baseline_exists AS baselineExists,
         baseline_content_fingerprint AS baselineContentFingerprint,
         baseline_version AS baselineVersion,
+        baseline_version_semantics AS baselineVersionSemantics,
         state,
         reason_code AS reasonCode,
         retry_disposition AS retryDisposition,
         observation_exists AS observationExists,
         observation_content_fingerprint AS observationContentFingerprint,
         observation_version AS observationVersion,
+        observation_version_semantics AS observationVersionSemantics,
         provider_request_id AS providerRequestId,
         observation_time AS observationTime,
         recorded_at AS recordedAt,
@@ -269,9 +291,12 @@ function normalizeRecovery(value) {
   if (!uncertainty.baseline || typeof uncertainty.baseline.exists !== 'boolean') {
     throw new ProviderRecoveryLedgerError('recovery baseline is invalid', 'PROVIDER_RECOVERY_RECORD_INVALID');
   }
+  requireVersionSemantics(uncertainty.baseline.versionSemantics, 'baseline.versionSemantics');
   if (uncertainty.baseline.exists) {
     requireFingerprint(uncertainty.baseline.contentFingerprint, 'baseline.contentFingerprint');
     requireString(uncertainty.baseline.version, 'baseline.version');
+  } else if (uncertainty.baseline.versionSemantics !== 'unknown') {
+    throw new ProviderRecoveryLedgerError('missing baseline must use unknown version semantics', 'PROVIDER_RECOVERY_RECORD_INVALID');
   }
   requireString(value.reasonCode, 'reasonCode');
   requireString(value.retryDisposition, 'retryDisposition');
@@ -279,11 +304,21 @@ function normalizeRecovery(value) {
     if (typeof value.observation !== 'object' || Array.isArray(value.observation) || typeof value.observation.exists !== 'boolean') {
       throw new ProviderRecoveryLedgerError('recovery observation is invalid', 'PROVIDER_RECOVERY_RECORD_INVALID');
     }
+    requireVersionSemantics(value.observation.versionSemantics, 'observation.versionSemantics');
     if (value.observation.exists) {
       requireFingerprint(value.observation.contentFingerprint, 'observation.contentFingerprint');
       requireString(value.observation.version, 'observation.version');
+    } else if (value.observation.versionSemantics !== 'unknown') {
+      throw new ProviderRecoveryLedgerError('missing observation must use unknown version semantics', 'PROVIDER_RECOVERY_RECORD_INVALID');
     }
     dateIso(new Date(value.observation.observedAt), 'PROVIDER_RECOVERY_RECORD_INVALID');
+  }
+  return value;
+}
+
+function requireVersionSemantics(value, field) {
+  if (!VERSION_SEMANTICS.has(value)) {
+    throw new ProviderRecoveryLedgerError(`${field} is invalid`, 'PROVIDER_RECOVERY_RECORD_INVALID');
   }
   return value;
 }
