@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { FencedSqliteClaimLedger } from '../src/ledger/fenced-sqlite-claim-ledger.mjs';
 import { planFingerprint } from '../src/plan/fingerprint.mjs';
+import { authorityBindingFingerprint } from '../src/dispatch/request.mjs';
 import {
   ColossusDispatchAdapter,
   ColossusDispatchError
@@ -18,7 +19,16 @@ const NOW = new Date('2026-08-01T22:00:00.000Z');
 const REGISTRY = Object.freeze({
   'commander@ref-1': Object.freeze({
     adapterId: 'commander',
-    methods: Object.freeze({ execute: Object.freeze(['filesystem.move']) })
+    methods: Object.freeze({ execute: Object.freeze(['filesystem.move']) }),
+    authority: Object.freeze({
+      'filesystem.move': Object.freeze({
+        minHandles: 1,
+        maxHandles: 1,
+        handles: Object.freeze([
+          Object.freeze({ type: 'filesystem-root', scope: 'move-within-root' })
+        ])
+      })
+    })
   })
 });
 
@@ -51,7 +61,13 @@ function subject() {
 }
 
 function request(overrides = {}) {
-  return {
+  const requestedHandles = overrides.scopedHandles ?? [{
+    type: 'filesystem-root',
+    id: 'root-1',
+    scope: 'move-within-root',
+    expiresAt: '2026-08-01T22:00:30.000Z'
+  }];
+  const base = {
     protocolVersion: 'sigma-federation/v1',
     schemaVersion: 'colossus-dispatch/v1',
     requestId: 'request-1',
@@ -63,14 +79,17 @@ function request(overrides = {}) {
     idempotencyKey: 'idem-job-1',
     planFingerprint: 'sha256:plan-1',
     policyVersion: 'policy-v1',
-    scopedHandles: [{
-      type: 'filesystem-root',
-      id: 'root-1',
-      scope: 'move-within-root',
-      expiresAt: '2026-08-01T22:00:30.000Z'
-    }],
     payload: { sourceId: 'file-1', destinationId: 'folder-2' },
     ...overrides
+  };
+  delete base.scopedHandles;
+  const bindingFingerprint = authorityBindingFingerprint(base);
+  return {
+    ...base,
+    scopedHandles: requestedHandles.map((handle) => ({
+      ...handle,
+      bindingFingerprint: handle.bindingFingerprint ?? bindingFingerprint
+    }))
   };
 }
 
@@ -126,6 +145,7 @@ test('dispatches only a ledger-issued permit through the registered Colossus rou
 
     assert.equal(receipt.status, 'dispatched');
     assert.equal(captured.resolvedAdapterId, 'commander');
+    assert.equal(captured.scopedHandles[0].bindingFingerprint, authorityBindingFingerprint(captured));
     assert.deepEqual(Object.keys(captured.authorization).sort(), ['expiresAt', 'permitFingerprint', 'permitId']);
     assert.ok(Object.isFrozen(captured));
     assert.ok(Object.isFrozen(captured.payload));
@@ -153,6 +173,59 @@ test('rejects permit or request substitution before transport', async () => {
     );
     assert.equal(calls, 0);
     assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId), null);
+  });
+});
+
+test('rejects scoped handles reused across dispatch subjects', async () => {
+  await withPermit(async ({ permit, ledger }) => {
+    let calls = 0;
+    const original = request();
+    const reusedHandle = original.scopedHandles[0];
+    const adapter = new ColossusDispatchAdapter({
+      registry: REGISTRY,
+      permitStore: ledger,
+      transport: { supportsAbort: true, dispatch: async () => { calls += 1; } }
+    });
+    const changedPayload = request({
+      payload: { sourceId: 'file-1', destinationId: 'folder-other' },
+      scopedHandles: [reusedHandle]
+    });
+    changedPayload.scopedHandles[0].bindingFingerprint = reusedHandle.bindingFingerprint;
+
+    await assert.rejects(
+      adapter.dispatch({ permit, request: changedPayload, now: NOW }),
+      (error) => error instanceof ColossusDispatchError && error.code === 'SCOPED_HANDLE_BINDING_MISMATCH'
+    );
+    assert.equal(calls, 0);
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId), null);
+  });
+});
+
+test('rejects scoped handle authority broader than the capability policy', async () => {
+  await withPermit(async ({ permit, ledger }) => {
+    let calls = 0;
+    const adapter = new ColossusDispatchAdapter({
+      registry: REGISTRY,
+      permitStore: ledger,
+      transport: { supportsAbort: true, dispatch: async () => { calls += 1; } }
+    });
+
+    await assert.rejects(
+      adapter.dispatch({
+        permit,
+        request: request({
+          scopedHandles: [{
+            type: 'filesystem-root',
+            id: 'root-1',
+            scope: 'root-admin',
+            expiresAt: '2026-08-01T22:00:30.000Z'
+          }]
+        }),
+        now: NOW
+      }),
+      (error) => error instanceof ColossusDispatchError && error.code === 'SCOPED_HANDLE_POLICY_MISMATCH'
+    );
+    assert.equal(calls, 0);
   });
 });
 
