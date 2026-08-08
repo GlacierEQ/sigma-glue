@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SqliteClaimLedger } from '../src/ledger/sqlite-claim-ledger.mjs';
+import { FencedSqliteClaimLedger } from '../src/ledger/fenced-sqlite-claim-ledger.mjs';
 import { planFingerprint } from '../src/plan/fingerprint.mjs';
 import {
   ColossusDispatchAdapter,
@@ -76,7 +76,7 @@ function request(overrides = {}) {
 
 async function withPermit(run) {
   const dir = await mkdtemp(join(tmpdir(), 'sigma-glue-colossus-'));
-  const ledger = new SqliteClaimLedger(join(dir, 'claims.sqlite'), {
+  const ledger = new FencedSqliteClaimLedger(join(dir, 'claims.sqlite'), {
     approvalVerifier: createTestTrustStore()
   });
   try {
@@ -130,6 +130,7 @@ test('dispatches only a ledger-issued permit through the registered Colossus rou
     assert.ok(Object.isFrozen(captured));
     assert.ok(Object.isFrozen(captured.payload));
     assert.ok(Object.isFrozen(receipt));
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId).state, 'accepted');
   });
 });
 
@@ -151,6 +152,7 @@ test('rejects permit or request substitution before transport', async () => {
       (error) => error instanceof ColossusDispatchError && error.code === 'DISPATCH_PERMIT_TAMPERED'
     );
     assert.equal(calls, 0);
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId), null);
   });
 });
 
@@ -165,6 +167,7 @@ test('rejects expired permits before transport', async () => {
       adapter.dispatch({ permit, request: request(), now: new Date('2026-08-01T22:02:00.000Z') }),
       (error) => error instanceof ColossusDispatchError && error.code === 'DISPATCH_PERMIT_EXPIRED'
     );
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId), null);
   });
 });
 
@@ -184,6 +187,7 @@ test('resolves adapter and capability only from the registry', async () => {
       adapter.dispatch({ permit, request: request({ adapterId: 'other' }), now: NOW }),
       (error) => error instanceof ColossusDispatchError && error.code === 'DISPATCH_REQUEST_FIELD_FORBIDDEN'
     );
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId), null);
   });
 });
 
@@ -199,10 +203,11 @@ test('rejects raw credential-shaped data', async () => {
       adapter.dispatch({ permit, request: request({ payload: { accessToken: 'secret-value' } }), now: NOW }),
       (error) => error instanceof ColossusDispatchError && error.code === 'RAW_CREDENTIAL_FORBIDDEN'
     );
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId), null);
   });
 });
 
-test('rejects substituted or overclaimed Colossus receipts', async () => {
+test('rejects a substituted Colossus receipt and burns the one-shot attempt', async () => {
   await withPermit(async ({ permit, ledger }) => {
     const substituted = new ColossusDispatchAdapter({
       registry: REGISTRY,
@@ -216,7 +221,12 @@ test('rejects substituted or overclaimed Colossus receipts', async () => {
       substituted.dispatch({ permit, request: request(), now: NOW }),
       (error) => error instanceof ColossusDispatchError && error.code === 'COLOSSUS_RECEIPT_SUBJECT_MISMATCH'
     );
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId).state, 'started');
+  });
+});
 
+test('rejects an overclaimed Colossus receipt and burns the one-shot attempt', async () => {
+  await withPermit(async ({ permit, ledger }) => {
     const overclaimed = new ColossusDispatchAdapter({
       registry: REGISTRY,
       permitStore: ledger,
@@ -229,6 +239,7 @@ test('rejects substituted or overclaimed Colossus receipts', async () => {
       overclaimed.dispatch({ permit, request: request(), now: NOW }),
       (error) => error instanceof ColossusDispatchError && error.code === 'COLOSSUS_RECEIPT_OVERCLAIMED'
     );
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId).state, 'started');
   });
 });
 
@@ -293,10 +304,11 @@ test('rejects incompatible versions and overlong handle authority', async () => 
       }),
       (error) => error instanceof ColossusDispatchError && error.code === 'SCOPED_HANDLE_EXPIRED'
     );
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId), null);
   });
 });
 
-test('times out once without a silent retry', async () => {
+test('times out once without a silent retry and leaves recovery evidence', async () => {
   await withPermit(async ({ permit, ledger }) => {
     let calls = 0;
     const adapter = new ColossusDispatchAdapter({
@@ -324,5 +336,6 @@ test('times out once without a silent retry', async () => {
       (error) => error instanceof ColossusDispatchError && error.code === 'COLOSSUS_TIMEOUT'
     );
     assert.equal(calls, 1);
+    assert.equal(ledger.getDispatchAttemptByPermitId(permit.permitId).state, 'started');
   });
 });
