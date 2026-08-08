@@ -1,3 +1,4 @@
+import { planFingerprint } from '../plan/fingerprint.mjs';
 import {
   cloneCanonical,
   ColossusDispatchError,
@@ -41,16 +42,44 @@ export function normalizeRequest(request) {
   return deepFreeze(normalized);
 }
 
-export function validateScopedHandles(handles, now, permitExpiresAt) {
+export function authorityBindingFingerprint(request) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new ColossusDispatchError('dispatch request is required', 'DISPATCH_REQUEST_INVALID');
+  }
+  const subject = {
+    requestId: requireString(request.requestId, 'requestId', 'DISPATCH_REQUEST_INVALID'),
+    jobId: requireString(request.jobId, 'jobId', 'DISPATCH_REQUEST_INVALID'),
+    componentRef: requireString(request.componentRef, 'componentRef', 'DISPATCH_REQUEST_INVALID'),
+    method: requireString(request.method, 'method', 'DISPATCH_REQUEST_INVALID'),
+    capability: requireString(request.capability, 'capability', 'DISPATCH_REQUEST_INVALID'),
+    idempotencyKey: requireString(request.idempotencyKey, 'idempotencyKey', 'DISPATCH_REQUEST_INVALID'),
+    planFingerprint: requireString(request.planFingerprint, 'planFingerprint', 'DISPATCH_REQUEST_INVALID'),
+    policyVersion: requireString(request.policyVersion, 'policyVersion', 'DISPATCH_REQUEST_INVALID'),
+    payload: cloneCanonical(request.payload)
+  };
+  return planFingerprint(subject);
+}
+
+export function validateScopedHandles(handles, now, permitExpiresAt, request, authorityPolicy) {
   const nowMs = validDate(now, 'DISPATCH_TIME_INVALID');
   const permitExpiresMs = validTimestamp(permitExpiresAt, 'DISPATCH_PERMIT_INVALID');
   const ids = new Set();
+  if (!authorityPolicy || typeof authorityPolicy !== 'object') {
+    throw new ColossusDispatchError('scoped handle policy is required', 'SCOPED_HANDLE_POLICY_MISSING');
+  }
+  if (handles.length < authorityPolicy.minHandles || handles.length > authorityPolicy.maxHandles) {
+    throw new ColossusDispatchError(
+      'scoped handle count violates capability authority policy',
+      'SCOPED_HANDLE_POLICY_MISMATCH'
+    );
+  }
+  const expectedBinding = authorityBindingFingerprint(request);
 
   for (const [index, handle] of handles.entries()) {
     if (!handle || typeof handle !== 'object' || Array.isArray(handle)) {
       throw new ColossusDispatchError(`scoped handle ${index} is invalid`, 'SCOPED_HANDLE_INVALID');
     }
-    const allowed = ['type', 'id', 'scope', 'expiresAt'];
+    const allowed = ['type', 'id', 'scope', 'expiresAt', 'bindingFingerprint'];
     const unknown = Object.keys(handle).find((key) => !allowed.includes(key));
     if (unknown) {
       throw new ColossusDispatchError(
@@ -62,6 +91,20 @@ export function validateScopedHandles(handles, now, permitExpiresAt) {
     const expiresMs = validTimestamp(handle.expiresAt, 'SCOPED_HANDLE_INVALID');
     if (expiresMs <= nowMs || expiresMs > permitExpiresMs) {
       throw new ColossusDispatchError('scoped handle expiry exceeds authority window', 'SCOPED_HANDLE_EXPIRED');
+    }
+    if (handle.bindingFingerprint !== expectedBinding) {
+      throw new ColossusDispatchError(
+        'scoped handle is not bound to the exact dispatch subject',
+        'SCOPED_HANDLE_BINDING_MISMATCH'
+      );
+    }
+    if (!authorityPolicy.handles.some(
+      (pattern) => pattern.type === handle.type && pattern.scope === handle.scope
+    )) {
+      throw new ColossusDispatchError(
+        'scoped handle broadens capability authority',
+        'SCOPED_HANDLE_POLICY_MISMATCH'
+      );
     }
     if (ids.has(handle.id)) {
       throw new ColossusDispatchError('duplicate scoped handle id', 'SCOPED_HANDLE_INVALID');
