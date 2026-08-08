@@ -44,6 +44,29 @@ export class VerifiedExecutionLedger {
 
   recordProviderConfirmation({ operationId, confirmation, transitionKey, now = new Date() }) {
     const operation = this.#requireOperation(operationId);
+    const attemptEvent = [...this.#ledger.getEvents(operationId)].reverse().find(
+      (event) => event.eventType === 'execution.attempted'
+    );
+    if (!attemptEvent) {
+      throw new ExecutionLedgerError(
+        'provider confirmation has no durable execution attempt',
+        'PROVIDER_CONFIRMATION_ATTEMPT_MISSING'
+      );
+    }
+    const bindings = {
+      requestId: operation.requestId,
+      operationId: operation.operationId,
+      attemptId: attemptEvent.evidence.attemptId,
+      envelopeFingerprint: operation.envelopeFingerprint
+    };
+    for (const [field, expected] of Object.entries(bindings)) {
+      if (confirmation?.[field] !== expected) {
+        throw new ExecutionLedgerError(
+          `provider confirmation does not bind ${field}`,
+          'PROVIDER_CONFIRMATION_SUBJECT_MISMATCH'
+        );
+      }
+    }
     assertEvidenceTime({
       evidenceAt: confirmation?.confirmedAt,
       previousAt: operation.updatedAt,
