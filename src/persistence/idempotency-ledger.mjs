@@ -1,4 +1,4 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 
@@ -95,11 +95,34 @@ export class DurableIdempotencyLedger {
     }
   }
 
+  async release(plan) {
+    const expected = subject(plan);
+    const existing = await this.read(expected.idempotencyKey);
+    if (!existing || !sameSubject(existing, expected)) {
+      throw new IdempotencyLedgerError('idempotency claim is missing or mismatched', 'IDEMPOTENCY_SUBJECT_MISMATCH');
+    }
+    if (existing.state !== 'claimed') {
+      throw new IdempotencyLedgerError('only an uncompleted claim may be released', 'IDEMPOTENCY_RELEASE_NOT_ALLOWED');
+    }
+    try {
+      await unlink(this.fileFor(expected.idempotencyKey));
+      return { released: true };
+    } catch (error) {
+      if (error.code === 'ENOENT') {
+        throw new IdempotencyLedgerError('idempotency claim disappeared before release', 'IDEMPOTENCY_RELEASE_RACE');
+      }
+      throw error;
+    }
+  }
+
   async complete(plan, { receipt, reconciliation, now = new Date().toISOString() } = {}) {
     const expected = subject(plan);
     const existing = await this.read(expected.idempotencyKey);
     if (!existing || !sameSubject(existing, expected)) {
       throw new IdempotencyLedgerError('idempotency claim is missing or mismatched', 'IDEMPOTENCY_SUBJECT_MISMATCH');
+    }
+    if (existing.state !== 'claimed') {
+      throw new IdempotencyLedgerError('idempotency claim is not active', 'IDEMPOTENCY_CLAIM_NOT_ACTIVE');
     }
     const completed = {
       ...existing,
