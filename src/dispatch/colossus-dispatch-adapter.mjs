@@ -17,6 +17,7 @@ export class ColossusDispatchAdapter {
   #registry;
   #transport;
   #permitStore;
+  #scopedHandleTrustStore;
   #timeoutMs;
   #protocolVersion;
   #schemaVersion;
@@ -25,6 +26,7 @@ export class ColossusDispatchAdapter {
     registry,
     transport,
     permitStore,
+    scopedHandleTrustStore,
     timeoutMs = 10_000,
     protocolVersion = 'sigma-federation/v1',
     schemaVersion = 'colossus-dispatch/v1'
@@ -44,6 +46,12 @@ export class ColossusDispatchAdapter {
         'DISPATCH_PERMIT_STORE_INVALID'
       );
     }
+    if (!scopedHandleTrustStore || typeof scopedHandleTrustStore.verify !== 'function') {
+      throw new ColossusDispatchError(
+        'scoped-handle trust store is required',
+        'SCOPED_HANDLE_TRUST_STORE_INVALID'
+      );
+    }
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
       throw new ColossusDispatchError('timeoutMs must be a positive safe integer', 'COLOSSUS_TIMEOUT_INVALID');
     }
@@ -51,6 +59,7 @@ export class ColossusDispatchAdapter {
     this.#registry = normalizeRegistry(registry);
     this.#transport = transport;
     this.#permitStore = permitStore;
+    this.#scopedHandleTrustStore = scopedHandleTrustStore;
     this.#timeoutMs = timeoutMs;
     this.#protocolVersion = requireString(protocolVersion, 'protocolVersion', 'PROTOCOL_VERSION_INVALID');
     this.#schemaVersion = requireString(schemaVersion, 'schemaVersion', 'SCHEMA_VERSION_INVALID');
@@ -70,12 +79,24 @@ export class ColossusDispatchAdapter {
     assertExactBinding(normalizedPermit, normalizedRequest);
 
     const route = resolveRoute(this.#registry, normalizedRequest);
+    const verifiedAuthorities = normalizedRequest.scopedHandles.map((handle) => {
+      try {
+        return this.#scopedHandleTrustStore.verify(handle, { now });
+      } catch (error) {
+        throw new ColossusDispatchError(
+          error?.message || 'scoped-handle signature verification failed',
+          error?.code || 'SCOPED_HANDLE_SIGNATURE_INVALID',
+          { cause: error }
+        );
+      }
+    });
     validateScopedHandles(
       normalizedRequest.scopedHandles,
       now,
       normalizedPermit.expiresAt,
       normalizedRequest,
-      route.authorityPolicy
+      route.authorityPolicy,
+      verifiedAuthorities
     );
     rejectSecretShapedContent(normalizedRequest.payload, '$.payload');
     rejectSecretShapedContent(normalizedRequest.scopedHandles, '$.scopedHandles');
