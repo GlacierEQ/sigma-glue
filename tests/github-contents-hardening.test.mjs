@@ -154,13 +154,10 @@ test('file 404 is absence only after repository and branch are independently res
 });
 
 test('repository-hidden 404 cannot become confirmed_not_applied evidence', async () => {
-  const hiddenBroker = broker(async ({ url }) => {
-    const parsed = new URL(url);
-    return new Response(JSON.stringify({ message: 'Not Found' }), {
-      status: 404,
-      headers: { 'content-type': 'application/json' }
-    });
-  });
+  const hiddenBroker = broker(async () => new Response(JSON.stringify({ message: 'Not Found' }), {
+    status: 404,
+    headers: { 'content-type': 'application/json' }
+  }));
   const observer = new GitHubContentsProviderObserver({
     credentialBroker: hiddenBroker,
     credentialHandle: 'credh_hardening4'
@@ -242,24 +239,29 @@ test('valid state..json path is accepted consistently while traversal segments a
   });
   assert.equal(recovery.state, 'confirmed_applied');
 
-  assert.throws(
-    () => githubContentsPayload({
-      target: { ...TARGET, path: 'a//b' },
+  let brokerCalls = 0;
+  const transport = new GitHubContentsColossusTransport({
+    credentialBroker: broker(async () => {
+      brokerCalls += 1;
+      return fileResponse();
+    }),
+    credentialHandle: 'credh_hardening6'
+  });
+
+  for (const invalidPath of ['a//b', 'a/../b']) {
+    const invalidPayload = githubContentsPayload({
+      target: { ...TARGET, path: invalidPath },
       desiredContent: AFTER,
       baseline: BASELINE,
-      commitMessage: 'reject empty segment'
-    }),
-    /target path is unsafe/
-  );
-  assert.throws(
-    () => githubContentsPayload({
-      target: { ...TARGET, path: 'a/../b' },
-      desiredContent: AFTER,
-      baseline: BASELINE,
-      commitMessage: 'reject parent traversal'
-    }),
-    /target path is unsafe/
-  );
+      commitMessage: 'reject unsafe path'
+    });
+    await assert.rejects(
+      transport.dispatch(envelope(invalidPayload), { signal: new AbortController().signal }),
+      (error) => error instanceof GitHubContentsProviderError &&
+        error.code === 'GITHUB_CONTENTS_TARGET_INVALID'
+    );
+  }
+  assert.equal(brokerCalls, 0);
 });
 
 test('API bases with path prefixes are rejected instead of silently truncated', () => {
