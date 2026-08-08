@@ -14,6 +14,7 @@ const ENVELOPE_FINGERPRINT = planFingerprint({ envelope: 'verified' });
 const PERMIT_FINGERPRINT = planFingerprint({ permit: 'verified' });
 const BEFORE_FINGERPRINT = planFingerprint({ state: 'before' });
 const AFTER_FINGERPRINT = planFingerprint({ state: 'after' });
+const ATTEMPT_ID = 'attempt-verified';
 
 function receipt() {
   return {
@@ -29,6 +30,21 @@ function receipt() {
     status: 'dispatched',
     receivedAt: '2026-08-01T22:00:01.000Z',
     redactedDiagnostics: []
+  };
+}
+
+function confirmation(operation, overrides = {}) {
+  return {
+    requestId: operation.requestId,
+    operationId: operation.operationId,
+    attemptId: ATTEMPT_ID,
+    envelopeFingerprint: operation.envelopeFingerprint,
+    providerRequestId: 'providerref_verified-001',
+    confirmationMethod: 'provider-response',
+    beforeFingerprint: BEFORE_FINGERPRINT,
+    afterFingerprint: AFTER_FINGERPRINT,
+    confirmedAt: '2026-08-01T22:00:03.000Z',
+    ...overrides
   };
 }
 
@@ -51,12 +67,12 @@ function createDispatched(ledger) {
   });
 }
 
-function advanceToReconciling(ledger) {
-  let operation = createDispatched(ledger);
-  operation = ledger.recordAttempt({
+function advanceToAttempted(ledger) {
+  const operation = createDispatched(ledger);
+  return ledger.recordAttempt({
     operationId: operation.operationId,
     attempt: {
-      attemptId: 'attempt-verified',
+      attemptId: ATTEMPT_ID,
       adapterId: 'commander',
       envelopeFingerprint: ENVELOPE_FINGERPRINT,
       startedAt: '2026-08-01T22:00:02.000Z'
@@ -64,15 +80,13 @@ function advanceToReconciling(ledger) {
     transitionKey: 'attempt:verified',
     now: new Date('2026-08-01T22:00:02.000Z')
   });
+}
+
+function advanceToReconciling(ledger) {
+  let operation = advanceToAttempted(ledger);
   operation = ledger.recordProviderConfirmation({
     operationId: operation.operationId,
-    confirmation: {
-      providerRequestId: 'providerref_verified-001',
-      confirmationMethod: 'provider-response',
-      beforeFingerprint: BEFORE_FINGERPRINT,
-      afterFingerprint: AFTER_FINGERPRINT,
-      confirmedAt: '2026-08-01T22:00:03.000Z'
-    },
+    confirmation: confirmation(operation),
     transitionKey: 'confirmation:verified',
     now: new Date('2026-08-01T22:00:03.000Z')
   });
@@ -89,18 +103,7 @@ function advanceToReconciling(ledger) {
 
 test('accepts evidence bound to the dispatched adapter and envelope', async () => {
   await withLedger((ledger) => {
-    const operation = createDispatched(ledger);
-    const attempted = ledger.recordAttempt({
-      operationId: operation.operationId,
-      attempt: {
-        attemptId: 'attempt-verified',
-        adapterId: 'commander',
-        envelopeFingerprint: ENVELOPE_FINGERPRINT,
-        startedAt: '2026-08-01T22:00:02.000Z'
-      },
-      transitionKey: 'attempt:verified',
-      now: new Date('2026-08-01T22:00:02.000Z')
-    });
+    const attempted = advanceToAttempted(ledger);
     assert.equal(attempted.state, 'attempted');
   });
 });
@@ -167,6 +170,30 @@ test('rejects evidence timestamps before prior durable state or after observatio
       }),
       (error) => error instanceof ExecutionLedgerError && error.code === 'EXECUTION_ATTEMPT_TIME_INVALID'
     );
+  });
+});
+
+test('rejects provider confirmation cross-wired from another dispatch attempt', async () => {
+  await withLedger((ledger) => {
+    const operation = advanceToAttempted(ledger);
+    for (const [field, value] of [
+      ['requestId', 'request-other'],
+      ['operationId', 'operation-other'],
+      ['attemptId', 'attempt-other'],
+      ['envelopeFingerprint', planFingerprint({ envelope: 'other' })]
+    ]) {
+      assert.throws(
+        () => ledger.recordProviderConfirmation({
+          operationId: operation.operationId,
+          confirmation: confirmation(operation, { [field]: value }),
+          transitionKey: `confirmation:wrong:${field}`,
+          now: new Date('2026-08-01T22:00:03.000Z')
+        }),
+        (error) => error instanceof ExecutionLedgerError &&
+          error.code === 'PROVIDER_CONFIRMATION_SUBJECT_MISMATCH'
+      );
+    }
+    assert.equal(ledger.getOperation(operation.operationId).state, 'attempted');
   });
 });
 

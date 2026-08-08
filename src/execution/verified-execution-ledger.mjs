@@ -44,6 +44,29 @@ export class VerifiedExecutionLedger {
 
   recordProviderConfirmation({ operationId, confirmation, transitionKey, now = new Date() }) {
     const operation = this.#requireOperation(operationId);
+    const attemptEvent = [...this.#ledger.getEvents(operationId)].reverse().find(
+      (event) => event.eventType === 'execution.attempted'
+    );
+    if (!attemptEvent) {
+      throw new ExecutionLedgerError(
+        'provider confirmation has no durable execution attempt',
+        'PROVIDER_CONFIRMATION_ATTEMPT_MISSING'
+      );
+    }
+    const bindings = {
+      requestId: operation.requestId,
+      operationId: operation.operationId,
+      attemptId: attemptEvent.evidence.attemptId,
+      envelopeFingerprint: operation.envelopeFingerprint
+    };
+    for (const [field, expected] of Object.entries(bindings)) {
+      if (confirmation?.[field] !== expected) {
+        throw new ExecutionLedgerError(
+          `provider confirmation does not bind ${field}`,
+          'PROVIDER_CONFIRMATION_SUBJECT_MISMATCH'
+        );
+      }
+    }
     assertEvidenceTime({
       evidenceAt: confirmation?.confirmedAt,
       previousAt: operation.updatedAt,
@@ -85,6 +108,13 @@ export class VerifiedExecutionLedger {
       throw new ExecutionLedgerError(
         'reconciliation observation method changed after reconciliation started',
         'RECONCILIATION_METHOD_MISMATCH'
+      );
+    }
+    if (typeof result?.matchesExpected !== 'boolean' ||
+        result.matchesExpected !== (result.observedFingerprint === result.expectedFingerprint)) {
+      throw new ExecutionLedgerError(
+        'reconciliation match claim does not equal the fingerprint comparison',
+        'RECONCILIATION_MATCH_CLAIM_MISMATCH'
       );
     }
     assertEvidenceTime({
