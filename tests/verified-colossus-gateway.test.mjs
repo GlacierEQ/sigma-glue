@@ -20,7 +20,7 @@ import {
   signTestApproval
 } from './helpers/gatekeeper-fixture.mjs';
 
-const NOW = new Date('2026-08-08T16:30:00.000Z');
+const CLOCK_START = Date.parse('2026-08-08T16:30:00.000Z');
 const COMPONENT = Object.freeze({
   name: 'commander-test-root',
   ref: 'commander-test-root@v1',
@@ -91,15 +91,26 @@ function requestIdFor({ jobId, idempotencyKey, planHash }) {
   }).slice('sha256:'.length)}`;
 }
 
+function advancingClock() {
+  let nowMs = CLOCK_START;
+  return () => {
+    const value = new Date(nowMs);
+    nowMs += 1_000;
+    return value;
+  };
+}
+
 async function withSystem(run, {
   dishonestReconciliation = false,
   authorityExtra = null,
-  authorityExtraFirstOnly = false
+  authorityExtraFirstOnly = false,
+  confirmationExtra = null
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'sigma-verified-gateway-'));
   await mkdir(join(root, 'inbox'), { recursive: true });
   await writeFile(join(root, 'inbox', 'note.txt'), 'verified gateway\n');
 
+  const clock = advancingClock();
   const permitLedger = new FencedSqliteClaimLedger(join(root, 'authority.sqlite'), {
     approvalVerifier: createTestTrustStore()
   });
@@ -111,6 +122,7 @@ async function withSystem(run, {
   const registry = new ComponentRegistry();
   registry.register(COMPONENT);
   const capturedEnvelopes = [];
+  const durablePhasesObservedByBridge = [];
   let authorityCalls = 0;
 
   const gatekeeper = {
@@ -123,7 +135,7 @@ async function withSystem(run, {
       idempotencyKey: plan.idempotencyKey,
       policyVersion,
       issuedAt: '2026-08-08T16:29:00.000Z',
-      expiresAt: '2026-08-08T16:40:00.000Z',
+      expiresAt: '2026-08-08T16:50:00.000Z',
       status: 'approved'
     })
   };
@@ -143,7 +155,7 @@ async function withSystem(run, {
         resolvedAdapterId: envelope.resolvedAdapterId,
         capability: envelope.capability,
         status: 'dispatched',
-        receivedAt: NOW.toISOString(),
+        receivedAt: envelope.createdAt,
         redactedDiagnostics: []
       };
     }
@@ -158,7 +170,7 @@ async function withSystem(run, {
     executionLedger
   });
 
-  const dispatchAuthority = ({ permit }) => {
+  const dispatchAuthority = ({ permit, now }) => {
     authorityCalls += 1;
     const injectExtra = authorityExtra &&
       (!authorityExtraFirstOnly || authorityCalls === 1);
@@ -170,7 +182,7 @@ async function withSystem(run, {
         scope: 'move-within-root',
         expiresAt: new Date(Math.min(
           Date.parse(permit.expiresAt),
-          NOW.getTime() + 30_000
+          now.getTime() + 30_000
         )).toISOString()
       }],
       ...(injectExtra ? authorityExtra : {})
@@ -178,44 +190,44 @@ async function withSystem(run, {
   };
 
   const evidenceBridge = {
-    awaitProviderConfirmation: async ({ plan, operation }) => {
+    observationMethod: 'test-root-read-after-write',
+    awaitProviderConfirmation: async ({ plan, request, attempt, operation }) => {
+      durablePhasesObservedByBridge.push(
+        executionLedger.getOperation(operation.operationId).state
+      );
+      assert.equal(executionLedger.getOperation(operation.operationId).state, 'attempted');
       await commander[plan.operation === 'compensate' ? 'compensate' : 'execute'](
         plan,
         { idempotencyKey: plan.idempotencyKey }
       );
       return {
-        attempt: {
-          attemptId: `attempt-${plan.idempotencyKey}`,
-          adapterId: operation.resolvedAdapterId,
-          envelopeFingerprint: operation.envelopeFingerprint,
-          startedAt: NOW.toISOString()
-        },
-        confirmation: {
-          providerRequestId: `providerref_${plan.idempotencyKey.replace(/[^A-Za-z0-9._~-]/g, '_')}`,
-          confirmationMethod: 'test-root-commander',
-          beforeFingerprint: expectedBeforeFingerprint(plan),
-          afterFingerprint: expectedAfterFingerprint(plan),
-          confirmedAt: NOW.toISOString()
-        }
+        requestId: request.requestId,
+        operationId: operation.operationId,
+        attemptId: attempt.attemptId,
+        envelopeFingerprint: operation.envelopeFingerprint,
+        providerRequestId: `providerref_${plan.idempotencyKey.replace(/[^A-Za-z0-9._~-]/g, '_')}`,
+        confirmationMethod: 'test-root-commander',
+        beforeFingerprint: expectedBeforeFingerprint(plan),
+        afterFingerprint: expectedAfterFingerprint(plan),
+        confirmedAt: clock().toISOString(),
+        ...(confirmationExtra ?? {})
       };
     },
-    reconcile: async ({ plan, confirmation }) => {
+    reconcile: async ({ plan, confirmation, operation, reconciliationStart }) => {
+      durablePhasesObservedByBridge.push(
+        executionLedger.getOperation(operation.operationId).state
+      );
+      assert.equal(executionLedger.getOperation(operation.operationId).state, 'reconciling');
       await commander.reconcile(plan);
       const observed = dishonestReconciliation
         ? planFingerprint({ state: 'dishonest-substitution' })
         : confirmation.afterFingerprint;
       return {
-        start: {
-          observationMethod: 'test-root-read-after-write',
-          startedAt: NOW.toISOString()
-        },
-        result: {
-          observationMethod: 'test-root-read-after-write',
-          expectedFingerprint: confirmation.afterFingerprint,
-          observedFingerprint: observed,
-          matchesExpected: true,
-          observedAt: NOW.toISOString()
-        }
+        observationMethod: reconciliationStart.observationMethod,
+        expectedFingerprint: confirmation.afterFingerprint,
+        observedFingerprint: observed,
+        matchesExpected: true,
+        observedAt: clock().toISOString()
       };
     }
   };
@@ -226,14 +238,14 @@ async function withSystem(run, {
     executionLedger,
     dispatchAuthority,
     evidenceBridge,
-    now: () => NOW
+    now: clock
   });
   const orchestrator = new SigmaOrchestrator({
     registry,
     gatekeeper,
     colossus,
     ledger: outerLedger,
-    now: () => NOW
+    now: clock
   });
 
   try {
@@ -243,7 +255,8 @@ async function withSystem(run, {
       permitLedger,
       executionLedger,
       outerLedger,
-      capturedEnvelopes
+      capturedEnvelopes,
+      durablePhasesObservedByBridge
     });
   } finally {
     executionLedger.close();
@@ -259,7 +272,8 @@ test('orchestrator mutation traverses signed permit dispatch and verified execut
     permitLedger,
     executionLedger,
     outerLedger,
-    capturedEnvelopes
+    capturedEnvelopes,
+    durablePhasesObservedByBridge
   }) => {
     const result = await orchestrator.move(request());
 
@@ -267,6 +281,7 @@ test('orchestrator mutation traverses signed permit dispatch and verified execut
     assert.equal(result.receipt.status, 'provider_confirmed');
     assert.equal(result.reconciliation.status, 'reconciled');
     assert.equal(await readFile(join(root, 'archive', 'note.txt'), 'utf8'), 'verified gateway\n');
+    assert.deepEqual(durablePhasesObservedByBridge, ['attempted', 'reconciling']);
 
     assert.equal(capturedEnvelopes.length, 1);
     assert.deepEqual(capturedEnvelopes[0].payload, {
@@ -331,6 +346,36 @@ test('pretransport authority rejection releases outer claim and reuses unattempt
       payload: { operation: 'delete-everything' }
     },
     authorityExtraFirstOnly: true
+  });
+});
+
+test('cross-wired provider confirmation is rejected before provider-confirmed state', async () => {
+  await withSystem(async ({ orchestrator, executionLedger, outerLedger }) => {
+    const jobId = 'job-cross-wired-confirmation';
+    const idempotencyKey = 'idem-cross-wired-confirmation';
+
+    await assert.rejects(
+      orchestrator.move(request({ jobId, idempotencyKey })),
+      (error) => error.code === 'PROVIDER_CONFIRMATION_SUBJECT_MISMATCH' &&
+        error.job?.state === 'recovery_required'
+    );
+
+    const outer = await outerLedger.read(idempotencyKey);
+    assert.equal(outer.state, 'claimed');
+    const operation = executionLedger.getOperationByRequestId(requestIdFor({
+      jobId,
+      idempotencyKey,
+      planHash: outer.planFingerprint
+    }));
+    assert.equal(operation.state, 'attempted');
+    assert.equal(
+      executionLedger.getEvents(operation.operationId).some(
+        (event) => event.toState === 'provider_confirmed'
+      ),
+      false
+    );
+  }, {
+    confirmationExtra: { requestId: 'request_from_another_operation' }
   });
 });
 
