@@ -93,7 +93,8 @@ function requestIdFor({ jobId, idempotencyKey, planHash }) {
 
 async function withSystem(run, {
   dishonestReconciliation = false,
-  authorityExtra = null
+  authorityExtra = null,
+  authorityExtraFirstOnly = false
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'sigma-verified-gateway-'));
   await mkdir(join(root, 'inbox'), { recursive: true });
@@ -110,6 +111,7 @@ async function withSystem(run, {
   const registry = new ComponentRegistry();
   registry.register(COMPONENT);
   const capturedEnvelopes = [];
+  let authorityCalls = 0;
 
   const gatekeeper = {
     requestApproval: async ({ jobId, componentRef, method, policyVersion, plan }) => signTestApproval({
@@ -156,19 +158,24 @@ async function withSystem(run, {
     executionLedger
   });
 
-  const dispatchAuthority = ({ permit }) => ({
-    capability: 'filesystem.move',
-    scopedHandles: [{
-      type: 'filesystem-root',
-      id: 'test-root',
-      scope: 'move-within-root',
-      expiresAt: new Date(Math.min(
-        Date.parse(permit.expiresAt),
-        NOW.getTime() + 30_000
-      )).toISOString()
-    }],
-    ...(authorityExtra ?? {})
-  });
+  const dispatchAuthority = ({ permit }) => {
+    authorityCalls += 1;
+    const injectExtra = authorityExtra &&
+      (!authorityExtraFirstOnly || authorityCalls === 1);
+    return {
+      capability: 'filesystem.move',
+      scopedHandles: [{
+        type: 'filesystem-root',
+        id: 'test-root',
+        scope: 'move-within-root',
+        expiresAt: new Date(Math.min(
+          Date.parse(permit.expiresAt),
+          NOW.getTime() + 30_000
+        )).toISOString()
+      }],
+      ...(injectExtra ? authorityExtra : {})
+    };
+  };
 
   const evidenceBridge = {
     awaitProviderConfirmation: async ({ plan, operation }) => {
@@ -287,7 +294,7 @@ test('orchestrator mutation traverses signed permit dispatch and verified execut
   });
 });
 
-test('dispatch authority cannot smuggle a replacement mutation payload', async () => {
+test('pretransport authority rejection releases outer claim and reuses unattempted inner permit', async () => {
   await withSystem(async ({
     root,
     orchestrator,
@@ -297,22 +304,33 @@ test('dispatch authority cannot smuggle a replacement mutation payload', async (
   }) => {
     const jobId = 'job-authority-smuggle';
     const idempotencyKey = 'idem-authority-smuggle';
+    const operationRequest = request({ jobId, idempotencyKey });
+
     await assert.rejects(
-      orchestrator.move(request({ jobId, idempotencyKey })),
+      orchestrator.move(operationRequest),
       (error) => error.code === 'DISPATCH_AUTHORITY_FIELD_FORBIDDEN' &&
-        error.job?.state === 'recovery_required'
+        error.job?.state === 'failed'
     );
 
     assert.equal(capturedEnvelopes.length, 0);
-    const permit = permitLedger.getPermitByIdempotencyKey(idempotencyKey);
-    assert.ok(permit);
-    assert.equal(permitLedger.getDispatchAttemptByPermitId(permit.permitId), null);
-    assert.equal((await outerLedger.read(idempotencyKey)).state, 'claimed');
+    const permitBeforeRetry = permitLedger.getPermitByIdempotencyKey(idempotencyKey);
+    assert.ok(permitBeforeRetry);
+    assert.equal(permitLedger.getDispatchAttemptByPermitId(permitBeforeRetry.permitId), null);
+    assert.equal(await outerLedger.read(idempotencyKey), null);
     assert.equal(await readFile(join(root, 'inbox', 'note.txt'), 'utf8'), 'verified gateway\n');
+
+    const retried = await orchestrator.move(operationRequest);
+    const permitAfterRetry = permitLedger.getPermitByIdempotencyKey(idempotencyKey);
+    assert.equal(permitAfterRetry.permitId, permitBeforeRetry.permitId);
+    assert.equal(capturedEnvelopes.length, 1);
+    assert.equal(retried.job.state, 'reconciled');
+    assert.equal((await outerLedger.read(idempotencyKey)).state, 'completed');
+    assert.equal(await readFile(join(root, 'archive', 'note.txt'), 'utf8'), 'verified gateway\n');
   }, {
     authorityExtra: {
       payload: { operation: 'delete-everything' }
-    }
+    },
+    authorityExtraFirstOnly: true
   });
 });
 
