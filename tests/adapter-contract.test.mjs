@@ -29,6 +29,25 @@ test('orchestrator refuses to construct without a Colossus gateway', () => {
   assert.throws(() => new SigmaOrchestrator({ registry, gatekeeper: {}, commander: {} }), TypeError);
 });
 
+test('orchestrator refuses to construct without a durable idempotency fence', () => {
+  const registry = new ComponentRegistry();
+  registry.register(component);
+  const colossus = { dispatch: async () => ({}), reconcile: async () => ({}) };
+  assert.throws(
+    () => new SigmaOrchestrator({ registry, gatekeeper: {}, colossus }),
+    /durable idempotency ledger/
+  );
+  assert.throws(
+    () => new SigmaOrchestrator({
+      registry,
+      gatekeeper: {},
+      colossus,
+      ledger: { claim: async () => ({ reused: false, record: { state: 'claimed' } }) }
+    }),
+    /durable idempotency ledger/
+  );
+});
+
 test('adapter envelope rejects raw credential fields', () => {
   assert.throws(() => assertDispatchEnvelope(envelope({ plan: { accessToken: 'never-here' } })), (error) =>
     error instanceof AdapterContractError && error.code === 'RAW_CREDENTIALS_FORBIDDEN');
