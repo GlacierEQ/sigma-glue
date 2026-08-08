@@ -89,19 +89,26 @@ function delay(ms, signal) {
     return Promise.resolve();
   }
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
+    let settled = false;
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    const finish = (operation) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      operation();
+    };
+    const timer = setTimeout(() => finish(resolve), ms);
     const onAbort = () => {
       clearTimeout(timer);
-      reject(new GitHubContentsProviderError(
+      finish(() => reject(new GitHubContentsProviderError(
         'GitHub Contents observation was aborted',
         'GITHUB_CONTENTS_OBSERVATION_ABORTED'
-      ));
+      )));
     };
     if (signal) {
       signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
     }
-    const cleanup = () => signal?.removeEventListener('abort', onAbort);
-    Promise.resolve().then(() => timer).finally(cleanup);
   });
 }
 
