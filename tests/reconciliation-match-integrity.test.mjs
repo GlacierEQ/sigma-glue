@@ -16,6 +16,7 @@ const PERMIT = planFingerprint({ permit: 'match-integrity' });
 const BEFORE = planFingerprint({ state: 'before' });
 const AFTER = planFingerprint({ state: 'after' });
 const OTHER = planFingerprint({ state: 'other' });
+const ATTEMPT_ID = 'attempt-match-integrity';
 
 function receipt() {
   return {
@@ -47,7 +48,7 @@ async function withReconcilingLedger(run) {
     operation = ledger.recordAttempt({
       operationId: operation.operationId,
       attempt: {
-        attemptId: 'attempt-match-integrity',
+        attemptId: ATTEMPT_ID,
         adapterId: 'commander',
         envelopeFingerprint: ENVELOPE,
         startedAt: '2026-08-08T16:00:02.000Z'
@@ -58,6 +59,10 @@ async function withReconcilingLedger(run) {
     operation = ledger.recordProviderConfirmation({
       operationId: operation.operationId,
       confirmation: {
+        requestId: operation.requestId,
+        operationId: operation.operationId,
+        attemptId: ATTEMPT_ID,
+        envelopeFingerprint: operation.envelopeFingerprint,
         providerRequestId: 'providerref_match-integrity-001',
         confirmationMethod: 'provider-response',
         beforeFingerprint: BEFORE,
