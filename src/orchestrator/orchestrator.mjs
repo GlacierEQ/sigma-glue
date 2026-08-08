@@ -109,7 +109,14 @@ export class SigmaOrchestrator {
       job = { ...job, planFingerprint: plan.planFingerprint };
       job = await this.advance(job, 'planned', this.metadata(plan.planFingerprint, 'PLAN_CREATED'));
       job = await this.advance(job, 'awaiting_approval', this.metadata(plan.planFingerprint, 'APPROVAL_REQUESTED'));
-      const approval = await this.gatekeeper.requestApproval({ jobId: request.jobId, componentRef: request.componentRef, method, operation, plan });
+      const approval = await this.gatekeeper.requestApproval({
+        jobId: request.jobId,
+        componentRef: request.componentRef,
+        method,
+        operation,
+        policyVersion: this.policyVersion,
+        plan
+      });
       assertApprovalBinding({
         approval,
         expected: {
@@ -118,7 +125,8 @@ export class SigmaOrchestrator {
           planFingerprint: plan.planFingerprint,
           componentRef: request.componentRef,
           method,
-          idempotencyKey: plan.idempotencyKey
+          idempotencyKey: plan.idempotencyKey,
+          policyVersion: this.policyVersion
         },
         now: this.now()
       });
