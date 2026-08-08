@@ -77,7 +77,11 @@ test('malformed fresh claim fails closed before Colossus', async () => {
     registry: registry(),
     gatekeeper: gatekeeper(),
     colossus: successfulColossus(counter),
-    ledger: { claim: async () => undefined }
+    ledger: {
+      claim: async () => undefined,
+      complete: async () => {},
+      release: async () => {}
+    }
   });
 
   await assert.rejects(
@@ -174,6 +178,56 @@ test('provider-boundary failure remains claimed and becomes recovery required', 
       (error) => error.code === 'IDEMPOTENCY_RECOVERY_REQUIRED' && error.job?.state === 'recovery_required'
     );
     assert.equal(dispatches, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('reconciled provider outcome with failed ledger completion becomes recovery required', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'sigma-idem-completion-failure-'));
+  const durable = new DurableIdempotencyLedger(root);
+  const approvals = gatekeeper();
+  const counter = { count: 0 };
+  const transitions = [];
+  const ledger = {
+    claim: (...args) => durable.claim(...args),
+    release: (...args) => durable.release(...args),
+    complete: async () => { throw new Error('synthetic ledger completion failure'); }
+  };
+  const store = {
+    recordTransition: async (job) => { transitions.push(job.state); },
+    recordOutcome: async () => {},
+    recordFailure: async () => {}
+  };
+
+  try {
+    const first = new SigmaOrchestrator({
+      registry: registry(),
+      gatekeeper: approvals,
+      colossus: successfulColossus(counter),
+      ledger,
+      store
+    });
+    await assert.rejects(
+      () => first.move(request()),
+      (error) => error.job?.state === 'recovery_required' && /ledger completion failure/.test(error.message)
+    );
+    assert.equal(counter.count, 1);
+    assert.equal((await durable.read('idem-recovery-1'))?.state, 'claimed');
+    assert.equal(transitions.at(-1), 'recovery_required');
+
+    const second = new SigmaOrchestrator({
+      registry: registry(),
+      gatekeeper: approvals,
+      colossus: successfulColossus(counter),
+      ledger,
+      store
+    });
+    await assert.rejects(
+      () => second.move(request()),
+      (error) => error.code === 'IDEMPOTENCY_RECOVERY_REQUIRED'
+    );
+    assert.equal(counter.count, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

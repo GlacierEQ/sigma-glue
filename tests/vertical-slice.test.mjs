@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { ComponentRegistry } from '../src/registry/component-registry.mjs';
 import { normalizeMoveRequest } from '../src/protocol/request.mjs';
 import { SigmaOrchestrator, OrchestratorError } from '../src/orchestrator/orchestrator.mjs';
+import { DurableIdempotencyLedger } from '../src/persistence/idempotency-ledger.mjs';
 import { TestRootCommander } from '../src/runtime/test-root-commander.mjs';
 import { TestRootColossusGateway } from '../src/runtime/test-root-colossus.mjs';
 import { planFingerprint } from '../src/plan/fingerprint.mjs';
@@ -39,7 +40,12 @@ beforeEach(async () => {
   }};
   commander = new TestRootCommander(root);
   colossus = new TestRootColossusGateway({ commander, componentRef: component.ref });
-  orchestrator = new SigmaOrchestrator({ registry, gatekeeper, colossus });
+  orchestrator = new SigmaOrchestrator({
+    registry,
+    gatekeeper,
+    colossus,
+    ledger: new DurableIdempotencyLedger(join(root, '.sigma-idempotency'))
+  });
 });
 
 afterEach(async () => {
