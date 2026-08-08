@@ -13,16 +13,18 @@ export class VerifiedColossusGatewayError extends Error {
  * append-only execution evidence, provider confirmation, and reconciliation
  * behind the existing SigmaOrchestrator { dispatch, reconcile } gateway shape.
  *
- * This class does not own provider credentials or provider APIs. The injected
- * evidenceBridge supplies bounded component/provider evidence. The gateway
- * verifies and persists that evidence before projecting the legacy
- * provider_confirmed/reconciled receipts expected by SigmaOrchestrator.
+ * The gateway owns the dispatch projection from the already-approved plan so a
+ * pluggable deployment component cannot smuggle a different mutation payload
+ * under the approved plan fingerprint. The injected dispatchAuthority may
+ * supply only a capability and scoped handles; the injected evidenceBridge may
+ * supply only bounded execution/reconciliation evidence. Neither owns provider
+ * credentials here.
  */
 export class VerifiedColossusGateway {
   #permitLedger;
   #dispatchCoordinator;
   #executionLedger;
-  #requestBuilder;
+  #dispatchAuthority;
   #evidenceBridge;
   #now;
 
@@ -30,7 +32,7 @@ export class VerifiedColossusGateway {
     permitLedger,
     dispatchCoordinator,
     executionLedger,
-    requestBuilder,
+    dispatchAuthority,
     evidenceBridge,
     now = () => new Date()
   } = {}) {
@@ -61,10 +63,10 @@ export class VerifiedColossusGateway {
         'VERIFIED_EXECUTION_LEDGER_INVALID'
       );
     }
-    if (typeof requestBuilder !== 'function') {
+    if (typeof dispatchAuthority !== 'function') {
       throw new VerifiedColossusGatewayError(
-        'dispatch request builder is required',
-        'DISPATCH_REQUEST_BUILDER_INVALID'
+        'dispatch authority provider is required',
+        'DISPATCH_AUTHORITY_INVALID'
       );
     }
     if (!evidenceBridge ||
@@ -82,7 +84,7 @@ export class VerifiedColossusGateway {
     this.#permitLedger = permitLedger;
     this.#dispatchCoordinator = dispatchCoordinator;
     this.#executionLedger = executionLedger;
-    this.#requestBuilder = requestBuilder;
+    this.#dispatchAuthority = dispatchAuthority;
     this.#evidenceBridge = evidenceBridge;
     this.#now = now;
   }
@@ -106,18 +108,19 @@ export class VerifiedColossusGateway {
     });
 
     const requestId = requestIdentity(subject);
-    const request = await this.#requestBuilder({
+    const authority = normalizeDispatchAuthority(await this.#dispatchAuthority({
       ...input,
       permit,
       requestId,
       now: this.#date()
+    }));
+    const request = buildPlanBoundDispatchRequest({
+      input,
+      subject,
+      permit,
+      requestId,
+      authority
     });
-    if (!request || request.requestId !== requestId) {
-      throw new VerifiedColossusGatewayError(
-        'dispatch request builder changed the deterministic request identity',
-        'DISPATCH_REQUEST_IDENTITY_MISMATCH'
-      );
-    }
 
     const dispatched = await this.#dispatchCoordinator.dispatchAndRecord({
       permit,
@@ -274,6 +277,74 @@ export class VerifiedColossusGateway {
     }
     return value;
   }
+}
+
+function buildPlanBoundDispatchRequest({ input, subject, requestId, authority }) {
+  const plan = input.plan;
+  const payload = canonicalPlanPayload(plan);
+  return Object.freeze({
+    protocolVersion: requiredString(plan.protocolVersion, 'plan.protocolVersion'),
+    schemaVersion: 'colossus-dispatch/v1',
+    requestId,
+    traceId: `trace_${planFingerprint({ requestId, jobId: subject.jobId }).slice('sha256:'.length)}`,
+    jobId: subject.jobId,
+    componentRef: subject.componentRef,
+    method: subject.method,
+    capability: authority.capability,
+    idempotencyKey: subject.idempotencyKey,
+    planFingerprint: subject.planFingerprint,
+    policyVersion: subject.policyVersion,
+    scopedHandles: authority.scopedHandles,
+    payload
+  });
+}
+
+function canonicalPlanPayload(plan) {
+  if (!Array.isArray(plan.items) || plan.items.length === 0) {
+    throw new VerifiedColossusGatewayError(
+      'approved plan must contain mutation items',
+      'PLAN_PAYLOAD_INVALID'
+    );
+  }
+  return Object.freeze({
+    operation: requiredString(plan.operation, 'plan.operation'),
+    provider: Object.freeze({
+      stableId: requiredString(plan.provider?.stableId, 'plan.provider.stableId')
+    }),
+    items: Object.freeze(plan.items.map((item, index) => Object.freeze({
+      stableId: requiredString(item?.stableId, `plan.items[${index}].stableId`),
+      source: requiredString(item?.source, `plan.items[${index}].source`),
+      destination: requiredString(item?.destination, `plan.items[${index}].destination`)
+    })))
+  });
+}
+
+function normalizeDispatchAuthority(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new VerifiedColossusGatewayError(
+      'dispatch authority must be an object',
+      'DISPATCH_AUTHORITY_INVALID'
+    );
+  }
+  const unknown = Object.keys(value).filter(
+    (field) => !['capability', 'scopedHandles'].includes(field)
+  );
+  if (unknown.length > 0) {
+    throw new VerifiedColossusGatewayError(
+      `dispatch authority cannot supply ${unknown[0]}`,
+      'DISPATCH_AUTHORITY_FIELD_FORBIDDEN'
+    );
+  }
+  if (!Array.isArray(value.scopedHandles)) {
+    throw new VerifiedColossusGatewayError(
+      'dispatch authority scopedHandles must be an array',
+      'DISPATCH_AUTHORITY_INVALID'
+    );
+  }
+  return Object.freeze({
+    capability: requiredString(value.capability, 'dispatchAuthority.capability'),
+    scopedHandles: Object.freeze(value.scopedHandles.map((handle) => Object.freeze({ ...handle })))
+  });
 }
 
 function orchestrationSubject(input) {
