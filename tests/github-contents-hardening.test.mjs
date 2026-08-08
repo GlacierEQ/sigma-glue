@@ -23,7 +23,8 @@ const AFTER = 'after';
 const BASELINE = Object.freeze({
   exists: true,
   contentFingerprint: githubContentFingerprint(BEFORE),
-  version: 'blob-before'
+  version: 'blob-before',
+  versionSemantics: 'content_addressed'
 });
 
 function envelope(payload) {
@@ -95,7 +96,8 @@ test('malformed 2xx PUT success remains an ambiguous recoverable outcome', async
   await assert.rejects(
     transport.dispatch(envelope(payload), { signal: new AbortController().signal }),
     (error) => error instanceof GitHubContentsProviderUncertainError &&
-      error.uncertainty.desiredFingerprint === payload.desired.fingerprint
+      error.uncertainty.desiredFingerprint === payload.desired.fingerprint &&
+      error.uncertainty.baseline.versionSemantics === 'content_addressed'
   );
   assert.equal(calls, 2);
 });
@@ -148,12 +150,13 @@ test('file 404 is absence only after repository and branch are independently res
     credentialHandle: 'credh_hardening3'
   });
 
-  const observed = await observer.inspectOutcome({ uncertainty: { target: TARGET } });
+  const observed = await observer.inspectTarget({ target: TARGET });
   assert.equal(observed.exists, false);
+  assert.equal(observed.versionSemantics, 'unknown');
   assert.equal(seen.length, 3);
 });
 
-test('repository-hidden 404 cannot become confirmed_not_applied evidence', async () => {
+test('repository-hidden 404 cannot become provider absence evidence', async () => {
   const hiddenBroker = broker(async () => new Response(JSON.stringify({ message: 'Not Found' }), {
     status: 404,
     headers: { 'content-type': 'application/json' }
@@ -163,7 +166,7 @@ test('repository-hidden 404 cannot become confirmed_not_applied evidence', async
     credentialHandle: 'credh_hardening4'
   });
   await assert.rejects(
-    observer.inspectOutcome({ uncertainty: { target: TARGET } }),
+    observer.inspectTarget({ target: TARGET }),
     (error) => error instanceof GitHubContentsProviderError &&
       error.code === 'GITHUB_CONTENTS_TARGET_UNRESOLVED'
   );
@@ -177,11 +180,39 @@ test('repository-hidden 404 cannot become confirmed_not_applied evidence', async
       envelopeFingerprint: 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
       desiredFingerprint: githubContentFingerprint(AFTER),
       target: TARGET,
-      baseline: { exists: false, contentFingerprint: null, version: null }
+      baseline: {
+        exists: false,
+        contentFingerprint: null,
+        version: null,
+        versionSemantics: 'unknown'
+      }
     }
   });
   assert.equal(recovery.state, 'still_unknown');
   assert.equal(recovery.retryDisposition, 'forbidden_until_resolved');
+});
+
+test('GitHub recovery observer rejects cross-wired provider or operation before I/O', async () => {
+  let calls = 0;
+  const observer = new GitHubContentsProviderObserver({
+    credentialBroker: broker(async () => {
+      calls += 1;
+      return fileResponse();
+    }),
+    credentialHandle: 'credh_hardening7'
+  });
+
+  for (const uncertainty of [
+    { provider: 'gitlab-contents/v1', operation: 'put', target: TARGET },
+    { provider: 'github-contents/v1', operation: 'delete', target: TARGET }
+  ]) {
+    await assert.rejects(
+      observer.inspectOutcome({ uncertainty }),
+      (error) => error instanceof GitHubContentsProviderError &&
+        error.code === 'GITHUB_CONTENTS_RECOVERY_SUBJECT_MISMATCH'
+    );
+  }
+  assert.equal(calls, 0);
 });
 
 test('recovery observer timeout freezes the operation even if observer ignores abort', async () => {
@@ -222,7 +253,8 @@ test('valid state..json path is accepted consistently while traversal segments a
         target,
         exists: true,
         contentFingerprint: desired,
-        version: 'blob-state-dotdot-name'
+        version: 'blob-state-dotdot-name',
+        versionSemantics: 'content_addressed'
       })
     }
   }).recover({
