@@ -12,6 +12,10 @@ import { FencedSqliteClaimLedger } from '../src/ledger/fenced-sqlite-claim-ledge
 import { planFingerprint } from '../src/plan/fingerprint.mjs';
 import { ProviderOutcomeRecoveryCoordinator } from '../src/recovery/provider-outcome-recovery.mjs';
 import {
+  DurableProviderOutcomeRecoveryCoordinator,
+  SqliteProviderRecoveryLedger
+} from '../src/recovery/sqlite-provider-recovery-ledger.mjs';
+import {
   GitHubContentsColossusTransport,
   GitHubContentsProviderObserver
 } from '../examples/colossus/github-contents-reference.mjs';
@@ -41,6 +45,8 @@ const observer = new GitHubContentsProviderObserver({
   credentialHandle
 });
 const root = await mkdtemp(join(tmpdir(), 'sigma-live-provider-'));
+const recoveryLedgerPath = join(root, 'provider-recovery.sqlite');
+let recoveryLedger = new SqliteProviderRecoveryLedger(recoveryLedgerPath);
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
 const issuer = 'sigma-live-proof-gatekeeper';
 const keyId = 'ephemeral-live-proof-key';
@@ -148,20 +154,31 @@ try {
     throw new Error('ambiguous provider write did not preserve a durable started attempt');
   }
 
-  const recovery = await new ProviderOutcomeRecoveryCoordinator({ observer }).recover({
-    uncertainty: {
-      provider: 'github-contents/v1',
-      operation: 'put',
-      idempotencyKey: secondSubject.idempotencyKey,
-      requestId: durableAttempt.requestId,
-      envelopeFingerprint: durableAttempt.envelopeFingerprint,
-      desiredFingerprint: payload2.desired.fingerprint,
-      target,
-      baseline: payload2.baseline
-    }
+  const uncertainty = {
+    provider: 'github-contents/v1',
+    operation: 'put',
+    idempotencyKey: secondSubject.idempotencyKey,
+    requestId: durableAttempt.requestId,
+    envelopeFingerprint: durableAttempt.envelopeFingerprint,
+    desiredFingerprint: payload2.desired.fingerprint,
+    target,
+    baseline: payload2.baseline
+  };
+  const durableRecovery = new DurableProviderOutcomeRecoveryCoordinator({
+    coordinator: new ProviderOutcomeRecoveryCoordinator({ observer }),
+    ledger: recoveryLedger
   });
+  const { recovery, receipt: recoveryReceipt } = await durableRecovery.recover({ uncertainty });
   if (recovery.state !== 'confirmed_applied' || recovery.retryDisposition !== 'do_not_retry_reconcile') {
     throw new Error(`ambiguous provider recovery did not prove applied: ${recovery.state}`);
+  }
+
+  recoveryLedger.close();
+  recoveryLedger = new SqliteProviderRecoveryLedger(recoveryLedgerPath);
+  const restartReceipt = recoveryLedger.getByRequestId(durableAttempt.requestId);
+  if (!restartReceipt || restartReceipt.recordFingerprint !== recoveryReceipt.recordFingerprint ||
+      restartReceipt.state !== 'confirmed_applied') {
+    throw new Error('provider recovery evidence did not survive close/reopen');
   }
 
   const putsBeforeReplay = broker.putCalls;
@@ -175,7 +192,7 @@ try {
   if (broker.putCalls !== putsBeforeReplay) throw new Error('replay reached the provider despite the one-shot fence');
 
   console.log(JSON.stringify({
-    schema: 'sigma.github-provider-live-proof.v1',
+    schema: 'sigma.github-provider-live-proof.v2',
     provider: 'github-contents/v1',
     target,
     candidateSha,
@@ -190,6 +207,8 @@ try {
       retryDisposition: recovery.retryDisposition,
       desiredFingerprint: payload2.desired.fingerprint,
       observedVersion: recovery.observation.version,
+      recoveryRecordFingerprint: recoveryReceipt.recordFingerprint,
+      recoveryRestartReadable: true,
       replayBlocked
     },
     providerCalls: {
@@ -198,12 +217,13 @@ try {
     }
   }, null, 2));
 } finally {
+  try { recoveryLedger.close(); } catch { /* already closed */ }
   ledger.close();
   await rm(root, { recursive: true, force: true });
 }
 
-async function inspectBaseline(providerObserver, target) {
-  const observed = await providerObserver.inspectOutcome({ uncertainty: { target } });
+async function inspectBaseline(providerObserver, providerTarget) {
+  const observed = await providerObserver.inspectOutcome({ uncertainty: { target: providerTarget } });
   return observed.exists
     ? {
         exists: true,
@@ -213,9 +233,15 @@ async function inspectBaseline(providerObserver, target) {
     : { exists: false, contentFingerprint: null, version: null };
 }
 
-async function executeSignedDispatch({ ledger, adapter, privateKey, issuer, keyId, payload, suffix }) {
+async function executeSignedDispatch({ ledger: claimLedger, adapter, privateKey: signingKey, issuer: signingIssuer, keyId: signingKeyId, payload, suffix }) {
   const subject = buildSubject(payload, suffix);
-  const permit = issuePermit({ ledger, privateKey, issuer, keyId, subject });
+  const permit = issuePermit({
+    ledger: claimLedger,
+    privateKey: signingKey,
+    issuer: signingIssuer,
+    keyId: signingKeyId,
+    subject
+  });
   const request = dispatchRequest(subject, payload, permit);
   const receipt = await adapter.dispatch({ permit, request, now: new Date() });
   return { receipt, permit, request, subject };
@@ -234,7 +260,7 @@ function buildSubject(payload, suffix) {
   });
 }
 
-function issuePermit({ ledger, privateKey, issuer, keyId, subject }) {
+function issuePermit({ ledger: claimLedger, privateKey: signingKey, issuer: signingIssuer, keyId: signingKeyId, subject }) {
   const now = new Date();
   const approval = signGatekeeperApproval({
     approval: {
@@ -243,12 +269,12 @@ function issuePermit({ ledger, privateKey, issuer, keyId, subject }) {
       expiresAt: new Date(now.getTime() + 300_000).toISOString(),
       status: 'approved'
     },
-    issuer,
-    keyId,
-    privateKey: privateKey.export({ type: 'pkcs8', format: 'pem' })
+    issuer: signingIssuer,
+    keyId: signingKeyId,
+    privateKey: signingKey.export({ type: 'pkcs8', format: 'pem' })
   });
-  ledger.registerApproval({ approval, now });
-  return ledger.claimDispatchPermit({ expected: subject, now });
+  claimLedger.registerApproval({ approval, now });
+  return claimLedger.claimDispatchPermit({ expected: subject, now });
 }
 
 function dispatchRequest(subject, payload, permit) {
@@ -279,7 +305,7 @@ function dispatchRequest(subject, payload, permit) {
   });
 }
 
-function liveBroker(token) {
+function liveBroker(secretToken) {
   let dropNextPut = false;
   const state = {
     getCalls: 0,
@@ -288,11 +314,11 @@ function liveBroker(token) {
     dropNextSuccessfulPutResponse() {
       dropNextPut = true;
     },
-    async authorizedFetch({ credentialHandle, url, request, signal }) {
-      if (credentialHandle !== credentialHandleExpected()) throw new Error('credential handle mismatch');
+    async authorizedFetch({ credentialHandle: handle, url, request, signal }) {
+      if (handle !== credentialHandleExpected()) throw new Error('credential handle mismatch');
       const headers = {
         ...request.headers,
-        authorization: `Bearer ${token}`,
+        authorization: `Bearer ${secretToken}`,
         'user-agent': 'sigma-glue-provider-live-proof'
       };
       if (request.method === 'GET') state.getCalls += 1;
