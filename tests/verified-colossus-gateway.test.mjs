@@ -91,7 +91,10 @@ function requestIdFor({ jobId, idempotencyKey, planHash }) {
   }).slice('sha256:'.length)}`;
 }
 
-async function withSystem(run, { dishonestReconciliation = false } = {}) {
+async function withSystem(run, {
+  dishonestReconciliation = false,
+  authorityExtra = null
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'sigma-verified-gateway-'));
   await mkdir(join(root, 'inbox'), { recursive: true });
   await writeFile(join(root, 'inbox', 'note.txt'), 'verified gateway\n');
@@ -106,6 +109,7 @@ async function withSystem(run, { dishonestReconciliation = false } = {}) {
   const commander = new TestRootCommander(root);
   const registry = new ComponentRegistry();
   registry.register(COMPONENT);
+  const capturedEnvelopes = [];
 
   const gatekeeper = {
     requestApproval: async ({ jobId, componentRef, method, policyVersion, plan }) => signTestApproval({
@@ -124,20 +128,23 @@ async function withSystem(run, { dishonestReconciliation = false } = {}) {
 
   const transport = {
     supportsAbort: true,
-    dispatch: async (envelope) => ({
-      receiptId: `receipt-${envelope.requestId}`,
-      requestId: envelope.requestId,
-      envelopeFingerprint: envelope.envelopeFingerprint,
-      permitFingerprint: envelope.authorization.permitFingerprint,
-      componentRef: envelope.componentRef,
-      method: envelope.method,
-      idempotencyKey: envelope.idempotencyKey,
-      resolvedAdapterId: envelope.resolvedAdapterId,
-      capability: envelope.capability,
-      status: 'dispatched',
-      receivedAt: NOW.toISOString(),
-      redactedDiagnostics: []
-    })
+    dispatch: async (envelope) => {
+      capturedEnvelopes.push(envelope);
+      return {
+        receiptId: `receipt-${envelope.requestId}`,
+        requestId: envelope.requestId,
+        envelopeFingerprint: envelope.envelopeFingerprint,
+        permitFingerprint: envelope.authorization.permitFingerprint,
+        componentRef: envelope.componentRef,
+        method: envelope.method,
+        idempotencyKey: envelope.idempotencyKey,
+        resolvedAdapterId: envelope.resolvedAdapterId,
+        capability: envelope.capability,
+        status: 'dispatched',
+        receivedAt: NOW.toISOString(),
+        redactedDiagnostics: []
+      };
+    }
   };
   const dispatchAdapter = new ColossusDispatchAdapter({
     registry: DISPATCH_REGISTRY,
@@ -149,18 +156,8 @@ async function withSystem(run, { dishonestReconciliation = false } = {}) {
     executionLedger
   });
 
-  const requestBuilder = ({ plan, jobId, method, approval, permit, requestId }) => ({
-    protocolVersion: plan.protocolVersion,
-    schemaVersion: 'colossus-dispatch/v1',
-    requestId,
-    traceId: `trace-${jobId}`,
-    jobId,
-    componentRef: plan.componentRef,
-    method,
+  const dispatchAuthority = ({ permit }) => ({
     capability: 'filesystem.move',
-    idempotencyKey: plan.idempotencyKey,
-    planFingerprint: plan.planFingerprint,
-    policyVersion: approval.policyVersion,
     scopedHandles: [{
       type: 'filesystem-root',
       id: 'test-root',
@@ -170,10 +167,7 @@ async function withSystem(run, { dishonestReconciliation = false } = {}) {
         NOW.getTime() + 30_000
       )).toISOString()
     }],
-    payload: {
-      itemIds: plan.items.map((item) => item.stableId),
-      providerRef: plan.provider.stableId
-    }
+    ...(authorityExtra ?? {})
   });
 
   const evidenceBridge = {
@@ -223,7 +217,7 @@ async function withSystem(run, { dishonestReconciliation = false } = {}) {
     permitLedger,
     dispatchCoordinator,
     executionLedger,
-    requestBuilder,
+    dispatchAuthority,
     evidenceBridge,
     now: () => NOW
   });
@@ -241,7 +235,8 @@ async function withSystem(run, { dishonestReconciliation = false } = {}) {
       orchestrator,
       permitLedger,
       executionLedger,
-      outerLedger
+      outerLedger,
+      capturedEnvelopes
     });
   } finally {
     executionLedger.close();
@@ -251,13 +246,31 @@ async function withSystem(run, { dishonestReconciliation = false } = {}) {
 }
 
 test('orchestrator mutation traverses signed permit dispatch and verified execution chain', async () => {
-  await withSystem(async ({ root, orchestrator, permitLedger, executionLedger, outerLedger }) => {
+  await withSystem(async ({
+    root,
+    orchestrator,
+    permitLedger,
+    executionLedger,
+    outerLedger,
+    capturedEnvelopes
+  }) => {
     const result = await orchestrator.move(request());
 
     assert.equal(result.job.state, 'reconciled');
     assert.equal(result.receipt.status, 'provider_confirmed');
     assert.equal(result.reconciliation.status, 'reconciled');
     assert.equal(await readFile(join(root, 'archive', 'note.txt'), 'utf8'), 'verified gateway\n');
+
+    assert.equal(capturedEnvelopes.length, 1);
+    assert.deepEqual(capturedEnvelopes[0].payload, {
+      operation: 'move',
+      provider: { stableId: 'local-test-root' },
+      items: [{
+        stableId: 'file:inbox/note.txt',
+        source: 'inbox/note.txt',
+        destination: 'archive/note.txt'
+      }]
+    });
 
     const permit = permitLedger.getPermitByIdempotencyKey(result.plan.idempotencyKey);
     assert.ok(permit);
@@ -271,6 +284,35 @@ test('orchestrator mutation traverses signed permit dispatch and verified execut
 
     const outer = await outerLedger.read(result.plan.idempotencyKey);
     assert.equal(outer.state, 'completed');
+  });
+});
+
+test('dispatch authority cannot smuggle a replacement mutation payload', async () => {
+  await withSystem(async ({
+    root,
+    orchestrator,
+    permitLedger,
+    outerLedger,
+    capturedEnvelopes
+  }) => {
+    const jobId = 'job-authority-smuggle';
+    const idempotencyKey = 'idem-authority-smuggle';
+    await assert.rejects(
+      orchestrator.move(request({ jobId, idempotencyKey })),
+      (error) => error.code === 'DISPATCH_AUTHORITY_FIELD_FORBIDDEN' &&
+        error.job?.state === 'recovery_required'
+    );
+
+    assert.equal(capturedEnvelopes.length, 0);
+    const permit = permitLedger.getPermitByIdempotencyKey(idempotencyKey);
+    assert.ok(permit);
+    assert.equal(permitLedger.getDispatchAttemptByPermitId(permit.permitId), null);
+    assert.equal((await outerLedger.read(idempotencyKey)).state, 'claimed');
+    assert.equal(await readFile(join(root, 'inbox', 'note.txt'), 'utf8'), 'verified gateway\n');
+  }, {
+    authorityExtra: {
+      payload: { operation: 'delete-everything' }
+    }
   });
 });
 
