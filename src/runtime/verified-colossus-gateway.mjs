@@ -14,12 +14,11 @@ export class VerifiedColossusGatewayError extends Error {
  * append-only execution evidence, provider confirmation, and reconciliation
  * behind the existing SigmaOrchestrator { dispatch, reconcile } gateway shape.
  *
- * The gateway owns the dispatch projection from the already-approved plan so a
- * pluggable deployment component cannot smuggle a different mutation payload
- * under the approved plan fingerprint. The injected dispatchAuthority may
- * supply only a capability and scoped handles; the injected evidenceBridge may
- * supply only bounded execution/reconciliation evidence. Neither owns provider
- * credentials here.
+ * The gateway owns the dispatch projection and durable phase boundaries. The
+ * deployment-supplied authority may provide only capability/scoped handles;
+ * the evidence bridge may provide only provider confirmation and reconciliation
+ * observations. Attempt/reconciliation start records are created here before
+ * awaiting external work so crashes remain restart-readable.
  */
 export class VerifiedColossusGateway {
   #permitLedger;
@@ -27,6 +26,7 @@ export class VerifiedColossusGateway {
   #executionLedger;
   #dispatchAuthority;
   #evidenceBridge;
+  #observationMethod;
   #now;
 
   constructor({
@@ -79,6 +79,13 @@ export class VerifiedColossusGateway {
         'PROVIDER_EVIDENCE_BRIDGE_INVALID'
       );
     }
+    if (typeof evidenceBridge.observationMethod !== 'string' ||
+        evidenceBridge.observationMethod.trim() === '') {
+      throw new VerifiedColossusGatewayError(
+        'provider evidence bridge observationMethod is required',
+        'RECONCILIATION_METHOD_INVALID'
+      );
+    }
     if (typeof now !== 'function') {
       throw new VerifiedColossusGatewayError('clock must be a function', 'CLOCK_INVALID');
     }
@@ -88,6 +95,7 @@ export class VerifiedColossusGateway {
     this.#executionLedger = executionLedger;
     this.#dispatchAuthority = dispatchAuthority;
     this.#evidenceBridge = evidenceBridge;
+    this.#observationMethod = evidenceBridge.observationMethod;
     this.#now = now;
   }
 
@@ -138,30 +146,38 @@ export class VerifiedColossusGateway {
         );
       }
 
-      const evidence = await this.#evidenceBridge.awaitProviderConfirmation({
+      const attemptAt = this.#date();
+      const attempt = Object.freeze({
+        attemptId: executionAttemptIdentity(dispatched.operation),
+        adapterId: dispatched.operation.resolvedAdapterId,
+        envelopeFingerprint: dispatched.operation.envelopeFingerprint,
+        startedAt: attemptAt.toISOString()
+      });
+      let operation = this.#executionLedger.recordAttempt({
+        operationId: dispatched.operation.operationId,
+        attempt,
+        transitionKey: `attempt:${requestId}`,
+        now: attemptAt
+      });
+
+      const confirmation = await this.#evidenceBridge.awaitProviderConfirmation({
         ...input,
         permit,
         request,
+        attempt,
         dispatchReceipt: dispatched.receipt,
-        operation: dispatched.operation,
+        operation,
         now: this.#date()
       });
-      if (!evidence || typeof evidence !== 'object' || !evidence.attempt || !evidence.confirmation) {
+      if (!confirmation || typeof confirmation !== 'object') {
         throw new VerifiedColossusGatewayError(
-          'provider evidence bridge returned incomplete execution evidence',
+          'provider evidence bridge returned incomplete confirmation evidence',
           'PROVIDER_EVIDENCE_INCOMPLETE'
         );
       }
-
-      let operation = this.#executionLedger.recordAttempt({
-        operationId: dispatched.operation.operationId,
-        attempt: evidence.attempt,
-        transitionKey: `attempt:${requestId}`,
-        now: this.#date()
-      });
       operation = this.#executionLedger.recordProviderConfirmation({
         operationId: operation.operationId,
-        confirmation: evidence.confirmation,
+        confirmation,
         transitionKey: `provider-confirmation:${requestId}`,
         now: this.#date()
       });
@@ -179,9 +195,9 @@ export class VerifiedColossusGateway {
         operation: subject.operation,
         idempotencyKey: subject.idempotencyKey,
         planFingerprint: subject.planFingerprint,
-        providerRequestId: evidence.confirmation.providerRequestId,
-        beforeFingerprint: evidence.confirmation.beforeFingerprint,
-        afterFingerprint: evidence.confirmation.afterFingerprint,
+        providerRequestId: confirmation.providerRequestId,
+        beforeFingerprint: confirmation.beforeFingerprint,
+        afterFingerprint: confirmation.afterFingerprint,
         dispatchReceiptId: dispatched.receipt.receiptId,
         executionOperationId: operation.operationId,
         requestId
@@ -222,29 +238,36 @@ export class VerifiedColossusGateway {
       );
     }
 
-    const evidence = await this.#evidenceBridge.reconcile({
+    const reconciliationAt = this.#date();
+    const reconciliationStart = Object.freeze({
+      observationMethod: this.#observationMethod,
+      startedAt: reconciliationAt.toISOString()
+    });
+    operation = this.#executionLedger.startReconciliation({
+      operationId: operation.operationId,
+      reconciliation: reconciliationStart,
+      transitionKey: `reconciliation-start:${requestId}`,
+      now: reconciliationAt
+    });
+
+    const result = await this.#evidenceBridge.reconcile({
       ...input,
       requestId,
       operation,
       confirmation: confirmationEvent.evidence,
+      reconciliationStart,
       now: this.#date()
     });
-    if (!evidence || typeof evidence !== 'object' || !evidence.start || !evidence.result) {
+    if (!result || typeof result !== 'object') {
       throw new VerifiedColossusGatewayError(
         'provider evidence bridge returned incomplete reconciliation evidence',
         'RECONCILIATION_EVIDENCE_INCOMPLETE'
       );
     }
 
-    operation = this.#executionLedger.startReconciliation({
-      operationId: operation.operationId,
-      reconciliation: evidence.start,
-      transitionKey: `reconciliation-start:${requestId}`,
-      now: this.#date()
-    });
     operation = this.#executionLedger.completeReconciliation({
       operationId: operation.operationId,
-      result: evidence.result,
+      result,
       transitionKey: `reconciliation-result:${requestId}`,
       now: this.#date()
     });
@@ -268,9 +291,9 @@ export class VerifiedColossusGateway {
       operation: subject.operation,
       idempotencyKey: subject.idempotencyKey,
       planFingerprint: subject.planFingerprint,
-      observationMethod: evidence.result.observationMethod,
-      expectedFingerprint: evidence.result.expectedFingerprint,
-      observedFingerprint: evidence.result.observedFingerprint,
+      observationMethod: result.observationMethod,
+      expectedFingerprint: result.expectedFingerprint,
+      observedFingerprint: result.observedFingerprint,
       executionOperationId: operation.operationId,
       requestId
     });
@@ -415,6 +438,15 @@ function requestIdentity(subject) {
     idempotencyKey: subject.idempotencyKey,
     planFingerprint: subject.planFingerprint,
     policyVersion: subject.policyVersion
+  }).slice('sha256:'.length)}`;
+}
+
+function executionAttemptIdentity(operation) {
+  return `attempt_${planFingerprint({
+    operationId: operation.operationId,
+    requestId: operation.requestId,
+    envelopeFingerprint: operation.envelopeFingerprint,
+    adapterId: operation.resolvedAdapterId
   }).slice('sha256:'.length)}`;
 }
 
