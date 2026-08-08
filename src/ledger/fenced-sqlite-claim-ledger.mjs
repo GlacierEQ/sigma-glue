@@ -38,30 +38,40 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
     }
 
     this.#attemptIdFactory = dispatchAttemptIdFactory;
-    this.#fenceDb = new DatabaseSync(path, { timeout: timeoutMs });
-    this.#fenceDb.exec(`
-      PRAGMA foreign_keys = ON;
-      PRAGMA journal_mode = WAL;
-      PRAGMA synchronous = FULL;
-      PRAGMA busy_timeout = ${timeoutMs};
+    try {
+      this.#fenceDb = new DatabaseSync(path, { timeout: timeoutMs });
+      this.#fenceDb.exec(`
+        PRAGMA foreign_keys = ON;
+        PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = FULL;
+        PRAGMA busy_timeout = ${timeoutMs};
 
-      CREATE TABLE IF NOT EXISTS permit_dispatch_attempts (
-        attempt_id TEXT PRIMARY KEY,
-        permit_id TEXT NOT NULL UNIQUE,
-        idempotency_key TEXT NOT NULL UNIQUE,
-        permit_fingerprint TEXT NOT NULL UNIQUE,
-        state TEXT NOT NULL CHECK (state IN ('started', 'accepted')),
-        started_at TEXT NOT NULL,
-        accepted_at TEXT,
-        receipt_fingerprint TEXT,
-        FOREIGN KEY (permit_id) REFERENCES dispatch_permits(permit_id),
-        CHECK (
-          (state = 'started' AND accepted_at IS NULL AND receipt_fingerprint IS NULL)
-          OR
-          (state = 'accepted' AND accepted_at IS NOT NULL AND receipt_fingerprint IS NOT NULL)
-        )
-      ) STRICT;
-    `);
+        CREATE TABLE IF NOT EXISTS permit_dispatch_attempts (
+          attempt_id TEXT PRIMARY KEY,
+          permit_id TEXT NOT NULL UNIQUE,
+          idempotency_key TEXT NOT NULL UNIQUE,
+          permit_fingerprint TEXT NOT NULL UNIQUE,
+          state TEXT NOT NULL CHECK (state IN ('started', 'accepted')),
+          started_at TEXT NOT NULL,
+          accepted_at TEXT,
+          receipt_fingerprint TEXT,
+          FOREIGN KEY (permit_id) REFERENCES dispatch_permits(permit_id),
+          CHECK (
+            (state = 'started' AND accepted_at IS NULL AND receipt_fingerprint IS NULL)
+            OR
+            (state = 'accepted' AND accepted_at IS NOT NULL AND receipt_fingerprint IS NOT NULL)
+          )
+        ) STRICT;
+      `);
+    } catch (error) {
+      try { this.#fenceDb?.close(); } catch { /* preserve initialization failure */ }
+      super.close();
+      throw new PermitDispatchFenceError(
+        'dispatch-attempt store initialization failed',
+        'DISPATCH_ATTEMPT_STORE_INIT_FAILED',
+        { cause: error }
+      );
+    }
   }
 
   close() {
@@ -201,6 +211,15 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
         );
       }
 
+      const startedMs = Date.parse(existing.startedAt);
+      const acceptedMs = Date.parse(acceptedAt);
+      if (!Number.isFinite(startedMs) || !Number.isFinite(acceptedMs) || acceptedMs < startedMs) {
+        throw new PermitDispatchFenceError(
+          'accepted receipt evidence predates the durable dispatch attempt',
+          'DISPATCH_ATTEMPT_TIME_INVALID'
+        );
+      }
+
       const updated = this.#fenceDb.prepare(`
         UPDATE permit_dispatch_attempts
         SET state = 'accepted', accepted_at = ?, receipt_fingerprint = ?
@@ -271,7 +290,19 @@ export class FencedSqliteClaimLedger extends SqliteClaimLedger {
       this.#fenceDb.exec('COMMIT');
       return result;
     } catch (error) {
-      if (this.#fenceDb.isTransaction) this.#fenceDb.exec('ROLLBACK');
+      let rollbackFailure = null;
+      try {
+        if (this.#fenceDb.isTransaction) this.#fenceDb.exec('ROLLBACK');
+      } catch (rollbackError) {
+        rollbackFailure = rollbackError;
+      }
+      if (rollbackFailure) {
+        throw new PermitDispatchFenceError(
+          'dispatch-attempt transaction failed and rollback could not be verified',
+          'DISPATCH_ATTEMPT_ROLLBACK_FAILED',
+          { cause: rollbackFailure }
+        );
+      }
       if (error instanceof PermitDispatchFenceError) throw error;
       throw new PermitDispatchFenceError(
         'atomic dispatch-attempt transaction failed',
