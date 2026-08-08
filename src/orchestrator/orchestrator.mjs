@@ -184,6 +184,10 @@ export class SigmaOrchestrator {
       freshClaimPlan = null;
       return Object.freeze({ job, plan, approval: { approvalId: approval.approvalId }, receipt, reconciliation });
     } catch (error) {
+      if (error?.providerBoundaryEntered === false) {
+        providerBoundaryEntered = false;
+      }
+
       let failure = error instanceof OrchestratorError
         ? error
         : new OrchestratorError(error.message, error.code || 'ORCHESTRATOR_FAILED', job);
@@ -198,6 +202,19 @@ export class SigmaOrchestrator {
             'IDEMPOTENCY_RELEASE_FAILED',
             job
           );
+        }
+      }
+
+      if (!providerBoundaryEntered && job?.state === 'dispatched') {
+        try {
+          if (freshClaimPlan) {
+            job = await this.advance(job, 'recovery_required', this.metadata(job.planFingerprint || requestFingerprint, 'IDEMPOTENCY_RELEASE_UNCERTAIN'));
+          } else {
+            job = await this.advance(job, 'failed', this.metadata(job.planFingerprint || requestFingerprint, 'DISPATCH_REJECTED_BEFORE_PROVIDER_BOUNDARY'));
+          }
+          failure.job = job;
+        } catch {
+          // Preserve the original failure if failure-state persistence also fails.
         }
       }
 
