@@ -65,10 +65,17 @@ function fakeBroker(state, { loseNextPutResponse = false } = {}) {
   let lose = loseNextPutResponse;
   return {
     supportsOpaqueHandles: true,
-    async authorizedFetch({ request }) {
+    async authorizedFetch({ url, request }) {
       state.requestSequence += 1;
       const headers = { 'content-type': 'application/json', 'x-github-request-id': `REQ-${state.requestSequence}` };
       if (request.method === 'GET') {
+        const pathname = new URL(url).pathname;
+        if (!pathname.includes('/contents/')) {
+          if (pathname.includes('/git/ref/heads/')) {
+            return new Response(JSON.stringify({ ref: 'refs/heads/provider-canary' }), { status: 200, headers });
+          }
+          return new Response(JSON.stringify({ full_name: 'GlacierEQ/sigma-glue' }), { status: 200, headers });
+        }
         state.reads += 1;
         if (state.content === null) return new Response(JSON.stringify({ message: 'Not Found' }), { status: 404, headers });
         return new Response(JSON.stringify({
@@ -102,8 +109,13 @@ function fakeBroker(state, { loseNextPutResponse = false } = {}) {
 
 function baselineFor(state) {
   return state.content === null
-    ? { exists: false, contentFingerprint: null, version: null }
-    : { exists: true, contentFingerprint: githubContentFingerprint(state.content), version: state.sha };
+    ? { exists: false, contentFingerprint: null, version: null, versionSemantics: 'unknown' }
+    : {
+        exists: true,
+        contentFingerprint: githubContentFingerprint(state.content),
+        version: state.sha,
+        versionSemantics: 'content_addressed'
+      };
 }
 
 test('conditional write mutates once and an identical replay performs no second PUT', async () => {
@@ -141,7 +153,8 @@ test('changed provider baseline blocks before mutation', async () => {
   const staleBaseline = {
     exists: true,
     contentFingerprint: githubContentFingerprint('old-state'),
-    version: 'blob-old'
+    version: 'blob-old',
+    versionSemantics: 'content_addressed'
   };
   const result = await transport.dispatch(envelope(githubContentsPayload({
     target: TARGET,
@@ -184,6 +197,7 @@ test('lost mutation response becomes recoverable confirmed_applied evidence', as
       return true;
     }
   );
+  assert.equal(uncertainty.baseline.versionSemantics, 'content_addressed');
   assert.equal(state.writes, 1);
   assert.equal(state.content, 'after-lost-response');
 
@@ -198,10 +212,11 @@ test('lost mutation response becomes recoverable confirmed_applied evidence', as
 
   assert.equal(recovery.state, 'confirmed_applied');
   assert.equal(recovery.retryDisposition, 'do_not_retry_reconcile');
+  assert.equal(recovery.observation.versionSemantics, 'content_addressed');
   assert.equal(state.writes, 1);
 });
 
-test('observation of unchanged baseline requires a new authorization rather than automatic retry', async () => {
+test('unchanged GitHub baseline after ambiguity remains unknown because blob SHA can be restored', async () => {
   const state = stateRecord('before');
   const broker = fakeBroker(state);
   const intent = githubContentsPayload({
@@ -229,8 +244,9 @@ test('observation of unchanged baseline requires a new authorization rather than
     clock: () => NOW
   }).recover({ uncertainty });
 
-  assert.equal(recovery.state, 'confirmed_not_applied');
-  assert.equal(recovery.retryDisposition, 'requires_new_authorization');
+  assert.equal(recovery.state, 'still_unknown');
+  assert.equal(recovery.retryDisposition, 'forbidden_until_resolved');
+  assert.equal(recovery.reasonCode, 'BASELINE_RESTORATION_AMBIGUOUS');
   assert.equal(state.writes, 0);
 });
 
@@ -238,7 +254,7 @@ test('desired fingerprint exactly binds desired bytes', () => {
   const valid = githubContentsPayload({
     target: TARGET,
     desiredContent: 'desired',
-    baseline: { exists: false, contentFingerprint: null, version: null },
+    baseline: { exists: false, contentFingerprint: null, version: null, versionSemantics: 'unknown' },
     commitMessage: 'valid'
   });
   assert.equal(valid.desired.fingerprint, githubContentFingerprint('desired'));
