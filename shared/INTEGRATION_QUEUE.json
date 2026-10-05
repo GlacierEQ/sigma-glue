@@ -1,0 +1,49 @@
+{
+  "schema_version": "scale-fde/integration-queue-v1",
+  "as_of": "2026-10-05T03:01:28Z",
+  "producer": "D",
+  "entries": [
+    {
+      "id": "D-IQ-001",
+      "owner_needed": "shared mission owner",
+      "status": "blocked_missing_artifact",
+      "artifact": "SCALE_FDE_MISSION.yaml",
+      "reason": "Canonical mission contract not found; D will not invent it."
+    },
+    {
+      "id": "D-IQ-002",
+      "owner_needed": "shared architecture owner",
+      "status": "blocked_missing_artifact",
+      "artifact": "ARCHITECTURE_CONTRACT.json",
+      "reason": "Needed before binding runtime endpoints."
+    },
+    {
+      "id": "D-IQ-003",
+      "owner_needed": "A",
+      "status": "ready_for_consumer",
+      "artifact": "SCALE_CAPABILITY_GRAPH.json",
+      "reason": "Include recovered sigma-glue base revision and D checkpoint capabilities when A publishes the graph."
+    },
+    {
+      "id": "D-IQ-004",
+      "owner_needed": "B",
+      "status": "blocked_cross_workstream",
+      "artifact": "verified Colossus runtime endpoint/transport contract",
+      "reason": "D must not bypass Colossus; live provider mutations need B's durable path or another already-verified deployed Colossus route."
+    },
+    {
+      "id": "D-IQ-005",
+      "owner_needed": "E",
+      "status": "ready_for_consumer",
+      "artifact": "CI and PR evidence",
+      "reason": "Ingest RED run 37257539385/job 111597735615 and GREEN run 37257654701/job 111598075584 plus PR #15."
+    },
+    {
+      "id": "D-IQ-006",
+      "owner_needed": "D",
+      "status": "open",
+      "artifact": "provider-specific contracts",
+      "reason": "Define target/version/consistency/idempotency/readback semantics for database, filesystem, external API, and deployment providers before live mutations."
+    }
+  ]
+}
