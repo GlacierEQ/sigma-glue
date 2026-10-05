@@ -1,0 +1,62 @@
+{
+  "schema_version": "scale-fde/receipt-index-v1",
+  "as_of": "2026-10-05T03:01:28Z",
+  "producer": "D",
+  "receipts": [
+    {
+      "id": "D-RCP-BASE",
+      "type": "source_revision",
+      "revision": "4a1ca8e5c88a62e8a94a43213b2c509af6afcea3",
+      "claim": "Recovered sigma-glue baseline before Scale D changes."
+    },
+    {
+      "id": "D-RCP-RED",
+      "type": "ci",
+      "revision": "5003a1b434d26b661df2a7a01958698d8e194fe7",
+      "workflow_run_id": 37257539385,
+      "job_id": 111597735615,
+      "outcome": "expected_failure",
+      "tests": {
+        "total": 141,
+        "pass": 140,
+        "fail": 1
+      }
+    },
+    {
+      "id": "D-RCP-GREEN",
+      "type": "ci",
+      "revision": "1687afced055a9a3648aa502bb42a61032893c4b",
+      "workflow_run_id": 37257654701,
+      "job_id": 111598075584,
+      "outcome": "success",
+      "tests": {
+        "total": 144,
+        "pass": 144,
+        "fail": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "id": "D-RCP-PR15",
+      "type": "pull_request",
+      "pull_request": 15,
+      "base": "scale-fde-demo",
+      "head": "scale/integration-mcp",
+      "head_revision": "1687afced055a9a3648aa502bb42a61032893c4b",
+      "draft": true,
+      "review_status": "no_blocking_review_threads_observed"
+    },
+    {
+      "id": "D-RCP-PROVIDERS",
+      "type": "provider_probe_set",
+      "providers": [
+        "GitHub",
+        "Supabase",
+        "DesktopCommander",
+        "Postman",
+        "Vercel"
+      ],
+      "detail_pointer": "shared/WORKSTREAM_D.json#provider_probes"
+    }
+  ]
+}
