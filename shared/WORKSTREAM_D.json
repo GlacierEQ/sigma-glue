@@ -1,0 +1,213 @@
+{
+  "schema_version": "scale-fde/workstream-v1",
+  "as_of": "2026-10-05T03:01:28Z",
+  "workstream": "D",
+  "role": "Integration / MCP / sigma-glue",
+  "repository": "GlacierEQ/sigma-glue",
+  "parent_branch": "scale-fde-demo",
+  "branch": "scale/integration-mcp",
+  "base_revision": "4a1ca8e5c88a62e8a94a43213b2c509af6afcea3",
+  "implementation_revision_before_receipts": "1687afced055a9a3648aa502bb42a61032893c4b",
+  "pull_request": 15,
+  "status": "checkpoint_verified_blocked_on_cross_workstream_and_provider_dependencies",
+  "exclusive_ownership": [
+    "sigma-glue workflow state machine",
+    "MCP tool selection and argument/dependency contracts",
+    "provider ambiguity protocol",
+    "idempotency and reconciliation",
+    "external provider readback"
+  ],
+  "recovered_invariants": [
+    "never store or request raw credentials",
+    "never approve; request exact Gatekeeper approval bound to plan fingerprint",
+    "never bypass Colossus for mutations",
+    "never broaden capability beyond the component registry",
+    "fail closed on illegal transitions and ambiguous provider outcomes"
+  ],
+  "state_machine": {
+    "canonical_live_states": [
+      "received",
+      "normalized",
+      "capability_checked",
+      "planned",
+      "awaiting_approval",
+      "approved",
+      "dispatched",
+      "attempted",
+      "provider_confirmed",
+      "reconciling",
+      "reconciled",
+      "blocked",
+      "failed",
+      "skipped",
+      "expired",
+      "recovery_required",
+      "cancelled"
+    ],
+    "mission_projection": [
+      "received",
+      "normalized",
+      "capability_checked",
+      "planned",
+      "dispatched",
+      "attempted",
+      "provider_confirmed",
+      "reconciling",
+      "reconciled"
+    ],
+    "preserved_governance_states": [
+      "awaiting_approval",
+      "approved"
+    ],
+    "note": "Mission projection does not remove Gatekeeper approval states."
+  },
+  "verified_changes": [
+    {
+      "id": "D-CHANGE-001",
+      "revision": "444ff4b234e3c3e4357655da3272c3d33e856074",
+      "claim": "credential-safe mandatory Scale tool-call evidence record implemented",
+      "evidence": "tests/scale-multi-provider-integration.test.mjs"
+    },
+    {
+      "id": "D-CHANGE-002",
+      "revision": "1687afced055a9a3648aa502bb42a61032893c4b",
+      "claim": "provider ambiguity recovery target identity generalized without adding mutation authority",
+      "evidence": "src/recovery/provider-outcome-recovery.mjs"
+    }
+  ],
+  "tdd_receipts": {
+    "red": {
+      "commit": "5003a1b434d26b661df2a7a01958698d8e194fe7",
+      "workflow_run_id": 37257539385,
+      "job_id": 111597735615,
+      "result": "failure_expected",
+      "tests_total": 141,
+      "tests_passed": 140,
+      "tests_failed": 1,
+      "failing_reason": "ERR_MODULE_NOT_FOUND for src/integration/tool-call-record.mjs"
+    },
+    "green": {
+      "commit": "1687afced055a9a3648aa502bb42a61032893c4b",
+      "workflow_run_id": 37257654701,
+      "job_id": 111598075584,
+      "result": "success",
+      "tests_total": 144,
+      "tests_passed": 144,
+      "tests_failed": 0,
+      "tests_skipped": 0
+    }
+  },
+  "provider_probes": [
+    {
+      "tool_selected": "GitHub.get_repo",
+      "reason": "Recover authoritative sigma-glue repository identity and permissions before engineering mutation.",
+      "input_fingerprint": "sha256:6358b68e649af968617b1f5a70fe092b9c39fdb58d09e888e05168729ed5cdda",
+      "attempt": 1,
+      "result": {
+        "status": "success",
+        "repository": "GlacierEQ/sigma-glue",
+        "repository_id": "1319647702",
+        "default_branch": "main",
+        "base_revision": "4a1ca8e5c88a62e8a94a43213b2c509af6afcea3"
+      },
+      "verification": {
+        "state": "verified",
+        "method": "provider_native_readback"
+      }
+    },
+    {
+      "tool_selected": "Supabase.list_projects",
+      "reason": "Discover an available database target without inventing a project identifier.",
+      "input_fingerprint": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "attempt": 1,
+      "result": {
+        "status": "success",
+        "visible_project_count": 0
+      },
+      "verification": {
+        "state": "blocked_external_dependency",
+        "method": "provider_native_readback",
+        "reason": "No visible Supabase project; no truthful database mutation/readback target."
+      }
+    },
+    {
+      "tool_selected": "DesktopCommander.list_devices",
+      "reason": "Discover an authorized filesystem execution plane without assuming a local checkout.",
+      "input_fingerprint": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "attempt": 1,
+      "result": {
+        "status": "success",
+        "online_device_count": 1,
+        "selected_device": "KcBs-MacBook-Air.local"
+      },
+      "verification": {
+        "state": "verified",
+        "method": "provider_native_readback",
+        "follow_up": "Searches under /Users found no sigma-glue checkout."
+      }
+    },
+    {
+      "tool_selected": "Postman.getAuthenticatedUser",
+      "reason": "Probe an independent external-API control surface using a read-only identity call.",
+      "input_fingerprint": "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "attempt": 1,
+      "result": {
+        "status": "rate_limited",
+        "provider_code": 429
+      },
+      "verification": {
+        "state": "blocked_external_dependency",
+        "method": "provider_error_readback",
+        "reason": "429 returned; no retry loop or mutation attempted."
+      }
+    },
+    {
+      "tool_selected": "Vercel.list_projects",
+      "reason": "Discover an existing deployment-provider target before any deployment operation.",
+      "input_fingerprint": "sha256:ff6458c4e44eb7fbee3c52cf96456f3b0ce74981f96bbff4afe538d79166ba88",
+      "attempt": 1,
+      "result": {
+        "status": "success",
+        "discovered_project": "colossus-gateway",
+        "project_id": "prj_fstQXOI5Kgw5omGnHE6Q1sHPndZq"
+      },
+      "verification": {
+        "state": "verified",
+        "method": "provider_native_readback"
+      }
+    },
+    {
+      "tool_selected": "Vercel.list_deployments",
+      "reason": "Read back deployment-provider state for the existing Colossus gateway.",
+      "input_fingerprint": "sha256:517c462109a0108d075762756fa0e3cdfd37829c2f705166baefc4ceffc6938c",
+      "attempt": 1,
+      "result": {
+        "status": "success",
+        "project": "colossus-gateway",
+        "production_ready_deployment": "dpl_893Kms5VcCANiu5SzEWyxiosmpf9",
+        "production_commit": "851f50ae67a8a333b480ef8106a5bcbd579c6a76"
+      },
+      "verification": {
+        "state": "verified",
+        "method": "provider_native_readback",
+        "note": "Readback only; no verified sigma-glue wiring to this deployment."
+      }
+    }
+  ],
+  "live_mutation_proof": {
+    "github_contents": "existing repo canary implementation recovered; not re-run because the available GitHub connector exposes no workflow-dispatch action",
+    "database": "blocked_no_visible_supabase_project",
+    "filesystem": "blocked_no_verified_colossus_routed_mutation_contract",
+    "external_api": "blocked_postman_429_and_no_verified_colossus_routed_mutation_contract",
+    "deployment_provider": "readback_verified; mutation blocked until a verified sigma-to-deployed-Colossus route exists",
+    "rule": "Direct connector mutation is forbidden as a substitute for Colossus-routed proof."
+  },
+  "unresolved_dependencies": [
+    "SCALE_FDE_MISSION.yaml not found in the GlacierEQ GitHub index",
+    "ARCHITECTURE_CONTRACT.json not found in the GlacierEQ GitHub index",
+    "SCALE_CAPABILITY_GRAPH.json not found in the GlacierEQ GitHub index",
+    "No verified live sigma-glue -> deployed colossus-gateway transport route recovered",
+    "Provider-specific database/filesystem/external-API/deployment ambiguity semantics remain required before live mutation proof"
+  ],
+  "next_frontier": "Consume shared mission/architecture/capability contracts, bind a verified deployed Colossus route, then execute provider-specific live ambiguity/readback proofs without direct connector bypass."
+}

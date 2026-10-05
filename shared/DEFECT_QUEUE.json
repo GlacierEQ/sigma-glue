@@ -1,0 +1,59 @@
+{
+  "schema_version": "scale-fde/defect-queue-v1",
+  "as_of": "2026-10-05T03:01:28Z",
+  "producer": "D",
+  "defects": [
+    {
+      "id": "D-DEF-001",
+      "status": "fixed_verified",
+      "severity": "high",
+      "defect": "Provider ambiguity target identity was hard-coded to GitHub owner/repo/branch/path.",
+      "fix_revision": "1687afced055a9a3648aa502bb42a61032893c4b",
+      "verification": "GREEN CI 37257654701: 144/144 pass."
+    },
+    {
+      "id": "D-DEF-002",
+      "status": "fixed_verified",
+      "severity": "high",
+      "defect": "No exact Scale tool-call evidence shape existed.",
+      "fix_revision": "444ff4b234e3c3e4357655da3272c3d33e856074",
+      "verification": "GREEN CI 37257654701: raw inputs excluded; credential-shaped evidence rejected."
+    },
+    {
+      "id": "D-DEF-003",
+      "status": "blocked_missing_shared_contract",
+      "severity": "critical",
+      "defect": "Canonical Scale mission/architecture/capability artifacts absent from recovered GitHub surface.",
+      "verification": "Organization code search returned no matching shared artifacts."
+    },
+    {
+      "id": "D-DEF-004",
+      "status": "blocked_external_dependency",
+      "severity": "medium",
+      "defect": "Connected Supabase provider exposes zero projects.",
+      "verification": "Supabase.list_projects returned an empty project list."
+    },
+    {
+      "id": "D-DEF-005",
+      "status": "blocked_external_dependency",
+      "severity": "medium",
+      "defect": "Postman external-API read-only identity probe is rate limited.",
+      "verification": "Postman.getAuthenticatedUser returned 429."
+    },
+    {
+      "id": "D-DEF-006",
+      "status": "blocked_integration_dependency",
+      "severity": "critical",
+      "defect": "No verified sigma-glue route to live deployed colossus-gateway recovered.",
+      "verification": "Vercel readback proves deployment exists; repository search did not establish integration."
+    },
+    {
+      "id": "D-DEF-007",
+      "status": "environment_constraint_mitigated",
+      "severity": "low",
+      "defect": "Sandbox GitHub clone DNS failed and authorized Mac has no sigma-glue checkout.",
+      "mitigation": "GitHub Actions used as execution/test environment.",
+      "verification": "GREEN CI 37257654701."
+    }
+  ]
+}
