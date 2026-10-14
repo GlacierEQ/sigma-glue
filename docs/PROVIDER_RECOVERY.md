@@ -28,6 +28,12 @@ The recovery record binds:
 - exact provider target;
 - pre-mutation baseline existence, content fingerprint, provider version, and version semantics.
 
+### Provider-neutral target identity
+
+The recovery coordinator preserves the **exact provider target identity** as strict canonical JSON rather than assuming every provider is a GitHub path. Target identities are bounded to 4096 UTF-8 bytes, recursively reject credential-shaped field names, reject unsafe control characters, and are fingerprinted as evidence rather than treated as authorization.
+
+This is an evidence-surface generalization only. It does **not** add a mutation route, select an adapter, grant capability, or weaken the Colossus/Gatekeeper boundary. Each provider adapter must still define its own target schema, version semantics, conditional-write semantics, and read-back contract. The legacy GitHub `owner/repo/branch/path` identity keeps its path-containment checks.
+
 Provider version semantics are explicit:
 
 - `monotonic_revision` — a provider guarantees the compared revision identity cannot recur after an intervening mutation;

@@ -25,6 +25,7 @@
 ### Provider ambiguity recovery
 
 - Provider uncertainty records bind provider, operation, idempotency key, request ID, exact dispatch-envelope fingerprint, desired-state fingerprint, exact target, original provider baseline, and provider version semantics.
+- Exact recovery targets are preserved as bounded, canonical provider-neutral JSON identities; credential-shaped target fields fail closed, while the legacy GitHub target retains path-safety validation.
 - Supported version-semantics classes are `monotonic_revision`, `content_addressed`, and `unknown`.
 - Recovery observation is bounded by a fail-closed timeout and receives an AbortSignal.
 - Desired state observed -> `confirmed_applied` -> desired provider state is currently present; no replay; proceed to reconciliation.
@@ -59,6 +60,14 @@
 - Proof-gated pre-provider failures may release retry authority only when the repository-internal boundary proof establishes that no provider transport attempt was durably observed.
 - Provider-boundary uncertainty and post-reconciliation ledger-completion failure route to recovery-required state instead of unsafe replay.
 - Durable execution/reconciliation evidence is append-only, transition-key protected, and hash-chain verifiable across restart.
+
+### Scale integration evidence contract
+
+- Tool-call evidence has one exact machine-readable shape: `tool_selected`, `reason`, `input_fingerprint`, `attempt`, `result`, and `verification`.
+- Raw call inputs are not retained in the evidence record; strict canonical input is represented by SHA-256 fingerprint.
+- Result and verification evidence reject credential-shaped fields recursively and require strict JSON-compatible data.
+- Recovery-target conformance is tested across GitHub, database, filesystem, external-API, and deployment-provider identity classes without claiming those classes share provider semantics.
+- This conformance layer does not bypass provider-specific adapter registration, Gatekeeper approval, Colossus dispatch, or independent read-back requirements.
 
 ### Colossus adapter and broker boundary
 

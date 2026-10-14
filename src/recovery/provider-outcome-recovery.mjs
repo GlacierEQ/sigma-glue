@@ -1,4 +1,4 @@
-import { planFingerprint } from '../plan/fingerprint.mjs';
+import { canonicalize, planFingerprint } from '../plan/fingerprint.mjs';
 
 const RECOVERY_STATES = new Set([
   'confirmed_applied',
@@ -318,31 +318,85 @@ function freezeResult({ uncertainty, state, observation, observedAt, reasonCode,
   return Object.freeze(result);
 }
 
+const TARGET_MAX_BYTES = 4096;
+const TARGET_SECRET_KEY_PATTERN = /(?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|password|passwd|secret|private[_-]?url|cookie)/i;
+
 function exactTarget(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length === 0) {
     throw new ProviderOutcomeRecoveryError('provider target is invalid', 'PROVIDER_TARGET_INVALID');
   }
-  const unknown = Object.keys(value).filter(
-    (field) => !['owner', 'repo', 'branch', 'path'].includes(field)
-  );
-  if (unknown.length > 0) {
+
+  let canonical;
+  try {
+    canonical = canonicalize(value, '$.target');
+  } catch (error) {
     throw new ProviderOutcomeRecoveryError(
-      `provider target contains unsupported field ${unknown[0]}`,
-      'PROVIDER_TARGET_INVALID'
+      'provider target must be strict JSON-compatible data',
+      'PROVIDER_TARGET_INVALID',
+      { cause: error }
     );
   }
-  const path = requiredString(value.path, 'target.path');
-  if (path.startsWith('/') ||
-      path.split('/').some((segment) => segment === '..' || segment === '') ||
-      /[\u0000-\u001F\u007F]/.test(path)) {
-    throw new ProviderOutcomeRecoveryError('provider target path is unsafe', 'PROVIDER_TARGET_INVALID');
+  if (Buffer.byteLength(canonical, 'utf8') > TARGET_MAX_BYTES) {
+    throw new ProviderOutcomeRecoveryError(
+      'provider target identity exceeds the maximum size',
+      'PROVIDER_TARGET_TOO_LARGE'
+    );
   }
-  return Object.freeze({
-    owner: requiredString(value.owner, 'target.owner'),
-    repo: requiredString(value.repo, 'target.repo'),
-    branch: requiredString(value.branch, 'target.branch'),
-    path
-  });
+
+  const normalized = JSON.parse(canonical);
+  validateTargetIdentity(normalized, 'target');
+
+  const fields = Object.keys(normalized).sort();
+  const legacyGithubTarget =
+    fields.length === 4 &&
+    fields[0] === 'branch' &&
+    fields[1] === 'owner' &&
+    fields[2] === 'path' &&
+    fields[3] === 'repo';
+
+  if (legacyGithubTarget) {
+    requiredString(normalized.owner, 'target.owner');
+    requiredString(normalized.repo, 'target.repo');
+    requiredString(normalized.branch, 'target.branch');
+    const path = requiredString(normalized.path, 'target.path');
+    if (path.startsWith('/') ||
+        path.split('/').some((segment) => segment === '..' || segment === '')) {
+      throw new ProviderOutcomeRecoveryError('provider target path is unsafe', 'PROVIDER_TARGET_INVALID');
+    }
+  }
+
+  return freezeJson(normalized);
+}
+
+function validateTargetIdentity(value, path) {
+  if (Array.isArray(value)) {
+    value.forEach((item, index) => validateTargetIdentity(item, `${path}[${index}]`));
+    return;
+  }
+  if (value && typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      if (typeof key !== 'string' || key.trim() === '' || /[\u0000-\u001F\u007F]/.test(key)) {
+        throw new ProviderOutcomeRecoveryError('provider target key is unsafe', 'PROVIDER_TARGET_INVALID');
+      }
+      if (TARGET_SECRET_KEY_PATTERN.test(key)) {
+        throw new ProviderOutcomeRecoveryError(
+          `provider target contains secret-shaped field ${key}`,
+          'PROVIDER_TARGET_SECRET_FORBIDDEN'
+        );
+      }
+      validateTargetIdentity(child, `${path}.${key}`);
+    }
+    return;
+  }
+  if (typeof value === 'string') {
+    requiredString(value, path);
+  }
+}
+
+function freezeJson(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) freezeJson(child);
+  return Object.freeze(value);
 }
 
 function versionSemantics(value) {
