@@ -1,6 +1,6 @@
 {
   "schema_version": "scale-fde/workstream-v1",
-  "as_of": "2026-10-05T03:01:28Z",
+  "as_of": "2026-10-14T02:55:00-10:00",
   "workstream": "D",
   "role": "Integration / MCP / sigma-glue",
   "repository": "GlacierEQ/sigma-glue",
@@ -9,7 +9,7 @@
   "base_revision": "4a1ca8e5c88a62e8a94a43213b2c509af6afcea3",
   "implementation_revision_before_receipts": "1687afced055a9a3648aa502bb42a61032893c4b",
   "pull_request": 15,
-  "status": "checkpoint_verified_blocked_on_cross_workstream_and_provider_dependencies",
+  "status": "transport_contract_deployed_read_only_mutation_proof_pending",
   "exclusive_ownership": [
     "sigma-glue workflow state machine",
     "MCP tool selection and argument/dependency contracts",
@@ -203,11 +203,51 @@
     "rule": "Direct connector mutation is forbidden as a substitute for Colossus-routed proof."
   },
   "unresolved_dependencies": [
-    "SCALE_FDE_MISSION.yaml not found in the GlacierEQ GitHub index",
-    "ARCHITECTURE_CONTRACT.json not found in the GlacierEQ GitHub index",
-    "SCALE_CAPABILITY_GRAPH.json not found in the GlacierEQ GitHub index",
-    "No verified live sigma-glue -> deployed colossus-gateway transport route recovered",
-    "Provider-specific database/filesystem/external-API/deployment ambiguity semantics remain required before live mutation proof"
+    "Provider-specific database/filesystem/external-API/deployment ambiguity semantics remain required before live mutation proof",
+    "Authenticated live Sigma OpaqueBrokerColossusHttpTransport -> deployed /v1/dispatch receipt proof is still required.",
+    "The deployed receiver intentionally blocks mutation capabilities; one provider-backed mutation plus ambiguity/readback reconciliation must be added and proven without exposing raw credentials."
   ],
-  "next_frontier": "Consume shared mission/architecture/capability contracts, bind a verified deployed Colossus route, then execute provider-specific live ambiguity/readback proofs without direct connector bypass."
+  "next_frontier": "Bind Sigma's opaque credential broker to the deployed /v1/dispatch endpoint, prove an exact read receipt live, then enable exactly one bounded provider-backed mutation capability with one-shot fencing and provider-native reconciliation.",
+  "current_colossus_route": {
+    "repository": "GlacierEQ/colossus-gateway",
+    "source_revision": "a027034f72adee6fb019e8e26edb24928283efce",
+    "source_commit_message": "Preserve all Colossus functions while fitting Vercel Hobby 12-function cap (#50)",
+    "production_deployment": {
+      "id": "dpl_5EUNb2y7EE2SbesKv4SKNetNtHL1",
+      "state": "READY",
+      "project": "colossus-gateway",
+      "route": "/v1/dispatch"
+    },
+    "protocol_contract": {
+      "protocolVersion": "sigma-federation/v1",
+      "schemaVersion": "colossus-dispatch/v1",
+      "receiver": "src/lib/sigmaDispatchReceiver.ts",
+      "route_binding": "vercel.json -> /v1/dispatch -> /api/mcp.ts",
+      "auth": "COLOSSUS_TOOL_KEY or COLOSSUS_KEY; fail closed in production",
+      "exact_binding": [
+        "x-sigma-envelope-fingerprint",
+        "x-sigma-request-id",
+        "x-sigma-trace-id",
+        "recomputed envelopeFingerprint",
+        "permit expiry"
+      ]
+    },
+    "current_capability": {
+      "accepted": "colossus-gateway@v1.read.gateway.capabilities",
+      "evidence_state": "LOCAL_DETERMINISTIC",
+      "mutations": "BLOCKED_CAPABILITY_NOT_ENABLED",
+      "provider_confirmation_claimed": false
+    },
+    "tests": {
+      "path": "tests/colossusDispatchReceiver.test.ts",
+      "cases": [
+        "unauthenticated rejection",
+        "exact Sigma-bound read receipt",
+        "tampered envelope/header rejection",
+        "external mutation blocked",
+        "expired permit and secret-shaped payload rejection"
+      ]
+    },
+    "evidence_boundary": "Source contract and READY Vercel deployment are verified. An authenticated live Sigma transport call and any provider mutation/reconciliation through this deployed route remain unverified."
+  }
 }
