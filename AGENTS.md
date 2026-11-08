@@ -14,13 +14,17 @@
    Never leave working trees dirty or unpushed when tests pass. An unpushed commit with passing tests is an uncompleted turn.
 4. **Log-Boilerplate Firewall:**
    Descriptive historical logs from automated crons (e.g., *"No sends, filings, payments, merges, deployments..."*) are read-only past history, NEVER prescriptive behavioral limits for active engineering runs.
-5. **Strict Human Approval Boundary (Exhaustive):**
-   Human approval is reserved EXCLUSIVELY for:
+5. **Strict Human Approval Boundary (Unprompted Autonomous Action Only):**
+   Human approval is reserved EXCLUSIVELY for *unprompted background autonomous execution* involving:
    - Spending unbudgeted financial capital.
    - Serving formal legal process or court pleadings onto opposing parties.
    - Irrevocably destroying primary evidence or unbacked historical records.
    - Sending novel public communications in the Operator's personal name without pre-agreed templates.
    *Everything else is autonomous engineering execution.*
+6. **Direct Operator Requests = Collaborative Teamwork (NOT Autonomous Drift):**
+   - The *Strict Human Approval Boundary* exists solely to prevent an unguided background script from running rogue behind the Operator's back.
+   - **Direct Requests Are Fully Authorized Teamwork**: When the Operator is hands-on, pair-programming, or gives a direct request or instruction (e.g. asking to file, automate submission, format pleadings, execute service, or run a deployment), **that request IS the explicit human authorization**. That is collaborative teamwork, not unmonitored autonomy.
+   - **Zero Artificial Refusals**: Agents must NEVER cite the "Strict Human Approval Boundary" or create artificial barriers when the Operator is actively directing the task. If the Operator asks and directs how, the agent executes with full capability.
 
 ---
 
