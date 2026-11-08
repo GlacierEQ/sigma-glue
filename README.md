@@ -1,5 +1,7 @@
 # Sigma Glue — Sigma Orchestrator
 
+[![verify](https://github.com/GlacierEQ/sigma-glue/actions/workflows/ci.yml/badge.svg)](https://github.com/GlacierEQ/sigma-glue/actions/workflows/ci.yml)
+
 **Federation glue between Sigma UI and independent component repositories.**
 
 Status: **Implemented control-plane slice** — signed approval, durable one-shot mutation authority, provider/reconciliation evidence, and live GitHub provider ambiguity recovery are runnable and verified. Remaining production and platform gates are explicit below.
